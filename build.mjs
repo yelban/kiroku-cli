@@ -43,9 +43,12 @@ for (const { entry, name } of bundles) {
 // Check if full protection build is requested (--jsc flag or BUILD_JSC env)
 // Without it, just produce plain .cjs (same as before) for dev convenience
 // ---------------------------------------------------------------------------
-const doJsc = process.argv.includes('--jsc') || process.env.BUILD_JSC === '1';
+const doProd =
+  process.argv.includes('--obfuscate') ||
+  process.argv.includes('--jsc') ||
+  process.env.BUILD_JSC === '1';
 
-if (!doJsc) {
+if (!doProd) {
   // Dev mode: rename .raw.cjs → .cjs (same as original build)
   for (const { name } of bundles) {
     const raw = `dist/${name}.raw.cjs`;
@@ -104,30 +107,19 @@ for (const { name } of bundles) {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 4: bytenode compile → .jsc
+// Stage 4: Finalize → dist/*.cjs (obfuscated)
 // ---------------------------------------------------------------------------
-console.log('Stage 4: bytenode compile → .jsc');
-const bytenode = (await import('bytenode')).default;
+console.log('Stage 4: Finalize');
 
 for (const { name } of bundles) {
   const obf = `dist/${name}.obf.cjs`;
-  const jsc = `dist/${name}.jsc`;
-  await bytenode.compileFile({ filename: obf, output: jsc });
-  console.log(`  dist/${name}.obf.cjs → dist/${name}.jsc`);
-}
-
-// ---------------------------------------------------------------------------
-// Stage 5: Generate loaders → dist/*.cjs (overwrite raw)
-// ---------------------------------------------------------------------------
-console.log('Stage 5: Generate loaders');
-
-for (const { name } of bundles) {
-  const isCliLoader = name === 'cli';
-  const loader = isCliLoader
-    ? `#!/usr/bin/env node\nrequire('bytenode');\nrequire('./${name}.jsc');\n`
-    : `require('bytenode');\nrequire('./${name}.jsc');\n`;
-  writeFileSync(`dist/${name}.cjs`, loader);
-  console.log(`  dist/${name}.cjs (loader)`);
+  const out = `dist/${name}.cjs`;
+  let code = readFileSync(obf, 'utf8');
+  if (name === 'cli') {
+    code = '#!/usr/bin/env node\n' + code;
+  }
+  writeFileSync(out, code);
+  console.log(`  dist/${name}.obf.cjs → dist/${name}.cjs`);
 }
 
 // ---------------------------------------------------------------------------
@@ -139,4 +131,4 @@ for (const { name } of bundles) {
   unlinkSync(`dist/${name}.obf.cjs`);
 }
 
-console.log('Build complete (bytecode protection enabled).');
+console.log('Build complete (obfuscated source protection).');

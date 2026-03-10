@@ -14,12 +14,12 @@
   "license": "UNLICENSED",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yelban/kiroku-public.git"
+    "url": "git+https://github.com/yelban/kiroku-cli.git"
   },
   "bugs": {
-    "url": "https://github.com/yelban/kiroku-public/issues"
+    "url": "https://github.com/yelban/kiroku-cli/issues"
   },
-  "homepage": "https://github.com/yelban/kiroku-public#readme",
+  "homepage": "https://github.com/yelban/kiroku-cli#readme",
   "engines": {
     "node": ">=20.0.0"
   },

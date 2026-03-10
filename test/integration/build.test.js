@@ -62,11 +62,10 @@ describe('package.json files field', () => {
     expect(pkg.files).not.toContain('src/');
   });
 
-  it('includes loaders, migrations, and postinstall', () => {
+  it('includes bundles and migrations', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
     expect(pkg.files).toContain('dist/*.cjs');
     expect(pkg.files).toContain('migrations/');
-    expect(pkg.files).toContain('scripts/postinstall.cjs');
   });
 
   it('does not include prompts/', () => {
@@ -77,7 +76,7 @@ describe('package.json files field', () => {
   it('has build and prepublishOnly scripts', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
     expect(pkg.scripts.build).toBe('node build.mjs');
-    expect(pkg.scripts.prepublishOnly).toBe('npm run build');
+    expect(pkg.scripts.prepublishOnly).toBe('node build.mjs --obfuscate');
   });
 });
 

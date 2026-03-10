@@ -67,10 +67,24 @@ export async function getSystemHealth(config) {
   components.embedding_model = { cached: modelCached, coverage_percent: coveragePercent };
 
   // ── Extraction key ──
+  // The key lives in Worker's env (loaded from ~/.kiroku/.env at startup).
+  // MCP/CLI may not have it — check env first, then fall back to .env file.
   const apiKeyEnv = config?.worker?.extraction?.apiKeyEnv || 'OPENROUTER_API_KEY';
-  const keySet = !!process.env[apiKeyEnv];
+  let keySet = !!process.env[apiKeyEnv];
+  if (!keySet) {
+    try {
+      const { join } = await import('node:path');
+      const { readFileSync } = await import('node:fs');
+      const { homedir } = await import('node:os');
+      const envPath = join(homedir(), '.kiroku', '.env');
+      if (existsSync(envPath)) {
+        const content = readFileSync(envPath, 'utf8');
+        keySet = content.split('\n').some(l => l.startsWith(apiKeyEnv + '=') && l.split('=')[1]?.trim());
+      }
+    } catch {}
+  }
   components.extraction_key = { set: keySet, env_var: apiKeyEnv };
-  if (!keySet) issues.push(`${apiKeyEnv} not set`);
+  if (!keySet) issues.push(`${apiKeyEnv} not set in env or ~/.kiroku/.env`);
 
   // ── License ──
   try {

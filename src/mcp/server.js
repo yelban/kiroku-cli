@@ -8,6 +8,7 @@ import { memorySearch } from './memory-search.js';
 import { memorySave, memoryForget } from './memory-write.js';
 import { sqlReadonly } from './sql-sandbox.js';
 import { healthStatus } from './health-status.js';
+import { getProjectBrief } from './project-brief.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { KIROKU_ROOT } from '../shared/paths.js';
@@ -86,6 +87,7 @@ By default searches both project-scoped and global (cross-project) facts.`,
       subject: z.string().describe('Subject entity name'),
       predicate: z.string().describe('Verb phrase'),
       object: z.string().describe('Value or description'),
+      detail: z.string().optional().describe('Optional elaboration (1-2 sentences)'),
       fact_type: z.string().optional().describe('semantic/episodic/preference/task/state'),
       project_id: z.string().optional().describe('Project ID'),
       scope: z.enum(['project', 'global']).optional()
@@ -148,6 +150,18 @@ By default searches both project-scoped and global (cross-project) facts.`,
       return { contents: [{ uri: 'kiroku://schema/memory', text, mimeType: 'text/plain' }] };
     }
   );
+
+  if (config.mcp.projectBrief.enabled) {
+    server.resource(
+      'project-brief',
+      'kiroku://context/project-brief',
+      { mimeType: 'text/plain', description: 'Auto-injected project context from memory' },
+      async () => {
+        const brief = getProjectBrief(getDb(), projectId, config.mcp.projectBrief.maxFacts);
+        return { contents: [{ uri: 'kiroku://context/project-brief', text: brief, mimeType: 'text/plain' }] };
+      }
+    );
+  }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

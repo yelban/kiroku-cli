@@ -15,6 +15,7 @@ export async function memorySave(params) {
     subject: params.subject,
     predicate: params.predicate,
     object: params.object,
+    detail: params.detail,
     factType,
     projectId: params.project_id,
     scope,

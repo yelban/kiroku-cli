@@ -70,6 +70,21 @@ const ConfigSchema = z.object({
       halfLifeHours: z.number().default(168),         // 7d
       accessBoost: z.number().default(0.05),
       extractedBaseHeat: z.number().default(0.7),
+      halfLifeByType: z.record(z.number().nullable()).default({
+        state: 168,       // 7d
+        episodic: 336,    // 14d
+        task: 504,        // 21d
+        semantic: 1440,   // 60d
+        preference: null, // never
+      }),
+      floorByType: z.record(z.number()).default({
+        state: 0.05,
+        episodic: 0.1,
+        task: 0.15,
+        semantic: 0.3,
+        preference: 0.7,
+      }),
+      freezeAfterInactiveDays: z.number().default(7),
     }).default({}),
   }).default({}),
   mcp: z.object({
@@ -80,6 +95,10 @@ const ConfigSchema = z.object({
       maxRows: z.number().default(200),
       maxCellBytes: z.number().default(2048),
       timeoutMs: z.number().default(3000),
+    }).default({}),
+    projectBrief: z.object({
+      enabled: z.boolean().default(true),
+      maxFacts: z.number().default(50),
     }).default({}),
   }).default({}),
   license: z.object({

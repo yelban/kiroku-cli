@@ -43,7 +43,7 @@ async function vectorSearch(db, params) {
 
   if (scope === 'project' || scope === 'all') {
     queries.push(db.prepare(`
-      SELECT fe.fact_id, fe.distance, f.predicate, f.object_text, f.fact_type, f.confidence, f.scope, f.created_at, e.canonical_name as subject
+      SELECT fe.fact_id, fe.distance, f.predicate, f.object_text, f.object_detail, f.fact_type, f.confidence, f.scope, f.created_at, e.canonical_name as subject
       FROM (
         SELECT fact_id, distance FROM fact_embeddings
         WHERE project_id = ? AND scope = 'project' AND status = ? AND embedding MATCH ? AND k = ?
@@ -55,7 +55,7 @@ async function vectorSearch(db, params) {
 
   if (scope === 'global' || scope === 'all') {
     queries.push(db.prepare(`
-      SELECT fe.fact_id, fe.distance, f.predicate, f.object_text, f.fact_type, f.confidence, f.scope, f.created_at, e.canonical_name as subject
+      SELECT fe.fact_id, fe.distance, f.predicate, f.object_text, f.object_detail, f.fact_type, f.confidence, f.scope, f.created_at, e.canonical_name as subject
       FROM (
         SELECT fact_id, distance FROM fact_embeddings
         WHERE scope = 'global' AND status = ? AND embedding MATCH ? AND k = ?
@@ -96,7 +96,7 @@ async function vectorSearch(db, params) {
 function textSearch(db, params) {
   const { query, project_id, limit, fact_types, time_from, time_to, status, scope } = params;
 
-  let sql = `SELECT f.id as fact_id, f.predicate, f.object_text, f.fact_type, f.confidence, f.scope, f.created_at, e.canonical_name as subject
+  let sql = `SELECT f.id as fact_id, f.predicate, f.object_text, f.object_detail, f.fact_type, f.confidence, f.scope, f.created_at, e.canonical_name as subject
     FROM facts f LEFT JOIN entities e ON f.subject_entity_id = e.id
     WHERE f.status = ?`;
   const p = [status];
@@ -153,6 +153,13 @@ function formatResults(rows) {
     const s = trunc(r.subject || '?', 30), p = trunc(r.predicate, 25), o = trunc(r.object_text, 50);
     const sc = r.scope || 'project';
     md += `| ${s} | ${p} | ${o} | ${r.fact_type} | ${sc} | ${r.confidence} | ${(r.created_at || '').substring(0, 10)} |\n`;
+  }
+  const withDetail = rows.filter(r => r.object_detail);
+  if (withDetail.length > 0) {
+    md += '\n**Details:**\n';
+    for (const r of withDetail) {
+      md += `- **${r.subject || '?'}** ${r.predicate}: ${r.object_detail}\n`;
+    }
   }
   return md + `\n_${rows.length} results_`;
 }

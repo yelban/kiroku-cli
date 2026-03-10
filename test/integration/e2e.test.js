@@ -17,7 +17,7 @@ function createTestDb() {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
 
-  const migrationFiles = ['001_init.sql', '003_scope.sql', '005_heat_decay.sql', '006_audit_log.sql'];
+  const migrationFiles = ['001_init.sql', '003_scope.sql', '005_heat_decay.sql', '006_audit_log.sql', '007_v12_enhancements.sql'];
   for (const file of migrationFiles) {
     const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
     const stmts = sql.split(';').map(s => s.trim()).filter(s => s && !s.toUpperCase().startsWith('PRAGMA'));

@@ -6,6 +6,10 @@ import { writeAudit } from '../shared/audit.js';
 
 const log = createLogger('store');
 
+function normalizeName(name) {
+  return name.toLowerCase().replace(/[-_ ]/g, '');
+}
+
 let _db = null;
 
 export function setDb(database) {
@@ -21,6 +25,9 @@ export function storeTurn(event) {
 
   // Ensure project exists
   d.prepare(`INSERT OR IGNORE INTO projects (id, name) VALUES (?, ?)`).run(projectId, projectId);
+  // Update last_active_at for decay freeze tracking
+  d.prepare('UPDATE projects SET last_active_at = ?, updated_at = ? WHERE id = ?')
+    .run(event.captured_at, event.captured_at, projectId);
 
   // Ensure conversation exists
   d.prepare(`INSERT OR IGNORE INTO conversations (id, project_id, auth_mode, system_hash, started_at) VALUES (?, ?, ?, ?, ?)`)
@@ -64,18 +71,33 @@ export function storeEntities(entities, projectId) {
     const name = entity.canonical_name;
     if (!name) continue;
 
-    // Check if entity already exists
-    const existing = d.prepare('SELECT id FROM entities WHERE canonical_name = ?').get(name);
+    // 1. Exact match by canonical_name
+    let existing = d.prepare('SELECT id, aliases_json FROM entities WHERE canonical_name = ?').get(name);
+
+    // 2. Normalized match fallback
+    if (!existing) {
+      const normalized = normalizeName(name);
+      existing = d.prepare('SELECT id, canonical_name, aliases_json FROM entities WHERE normalized_name = ?').get(normalized);
+      if (existing) {
+        // Merge new name into aliases
+        const aliases = JSON.parse(existing.aliases_json || '[]');
+        if (!aliases.includes(name) && name !== existing.canonical_name) {
+          aliases.push(name);
+          d.prepare('UPDATE entities SET aliases_json = ?, updated_at = ? WHERE id = ?')
+            .run(JSON.stringify(aliases), now, existing.id);
+        }
+      }
+    }
 
     if (existing) {
       entityMap.set(name, existing.id);
-      // Update last_seen_at
       d.prepare('UPDATE entities SET last_seen_at = ?, updated_at = ? WHERE id = ?')
         .run(now, now, existing.id);
     } else {
       const id = entityId();
-      d.prepare('INSERT INTO entities (id, canonical_name, entity_type, aliases_json, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(id, name, entity.entity_type || 'concept', JSON.stringify(entity.aliases || []), now, now);
+      const normalized = normalizeName(name);
+      d.prepare('INSERT INTO entities (id, canonical_name, entity_type, aliases_json, normalized_name, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, name, entity.entity_type || 'concept', JSON.stringify(entity.aliases || []), normalized, now, now);
       entityMap.set(name, id);
     }
   }
@@ -111,8 +133,8 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
     }
 
     const fid = factId();
-    d.prepare(`INSERT INTO facts (id, project_id, subject_entity_id, predicate, object_text, fact_type, confidence, heat, decay_bucket, source_turn_id, scope, status, base_heat, last_accessed_at, access_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(fid, projectId, subjectEntityId, fact.predicate, fact.object,
+    d.prepare(`INSERT INTO facts (id, project_id, subject_entity_id, predicate, object_text, object_detail, fact_type, confidence, heat, decay_bucket, source_turn_id, scope, status, base_heat, last_accessed_at, access_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(fid, projectId, subjectEntityId, fact.predicate, fact.object, fact.detail || null,
         fact.fact_type || 'semantic', fact.confidence || 0.5, 0.7, 'hot', sourceTurnId, scope, 'active',
         0.7, now, 0);
 
@@ -170,7 +192,7 @@ export function updateExtractionJob(jid, updates) {
 }
 
 // For manual saves from MCP gateway
-export function saveFactManually({ subject, predicate, object, factType, projectId, scope, licenseState }) {
+export function saveFactManually({ subject, predicate, object, detail, factType, projectId, scope, licenseState }) {
   const d = _db;
   if (!d) throw new Error('DB not set');
 
@@ -185,16 +207,30 @@ export function saveFactManually({ subject, predicate, object, factType, project
   // Ensure project exists
   d.prepare('INSERT OR IGNORE INTO projects (id, name) VALUES (?, ?)').run(projectId, projectId);
 
-  // Find or create entity
+  // Find or create entity (with normalized match fallback)
   let subjectEntityId;
-  const existing = d.prepare('SELECT id FROM entities WHERE canonical_name = ?').get(subject);
+  let existing = d.prepare('SELECT id, aliases_json FROM entities WHERE canonical_name = ?').get(subject);
+  if (!existing) {
+    const normalized = normalizeName(subject);
+    existing = d.prepare('SELECT id, canonical_name, aliases_json FROM entities WHERE normalized_name = ?').get(normalized);
+    if (existing) {
+      const aliases = JSON.parse(existing.aliases_json || '[]');
+      if (!aliases.includes(subject) && subject !== existing.canonical_name) {
+        aliases.push(subject);
+        d.prepare('UPDATE entities SET aliases_json = ?, updated_at = ? WHERE id = ?')
+          .run(JSON.stringify(aliases), now, existing.id);
+      }
+    }
+  }
+
   if (existing) {
     subjectEntityId = existing.id;
     d.prepare('UPDATE entities SET last_seen_at = ?, updated_at = ? WHERE id = ?').run(now, now, subjectEntityId);
   } else {
     subjectEntityId = entityId();
-    d.prepare('INSERT INTO entities (id, canonical_name, entity_type, aliases_json, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(subjectEntityId, subject, 'concept', '[]', now, now);
+    const normalized = normalizeName(subject);
+    d.prepare('INSERT INTO entities (id, canonical_name, entity_type, aliases_json, normalized_name, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(subjectEntityId, subject, 'concept', '[]', normalized, now, now);
   }
 
   // Supersede existing (same scope only)
@@ -207,8 +243,8 @@ export function saveFactManually({ subject, predicate, object, factType, project
 
   // Insert new fact
   const fid = factId();
-  d.prepare(`INSERT INTO facts (id, project_id, subject_entity_id, predicate, object_text, fact_type, confidence, heat, decay_bucket, source_turn_id, scope, status, base_heat, last_accessed_at, access_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(fid, projectId, subjectEntityId, predicate, object, factType || 'semantic', 1.0, 1.0, 'hot', null, resolvedScope, 'active',
+  d.prepare(`INSERT INTO facts (id, project_id, subject_entity_id, predicate, object_text, object_detail, fact_type, confidence, heat, decay_bucket, source_turn_id, scope, status, base_heat, last_accessed_at, access_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(fid, projectId, subjectEntityId, predicate, object, detail || null, factType || 'semantic', 1.0, 1.0, 'hot', null, resolvedScope, 'active',
       1.0, now, 0);
 
   return fid;
@@ -284,11 +320,23 @@ export function runDecaySweep(config) {
   const decay = config.worker?.decay;
   if (!decay?.enabled) return;
 
-  const halfLifeHours = decay.halfLifeHours || 168;
+  const defaultHalfLife = decay.halfLifeHours || 168;
+  const halfLifeByType = decay.halfLifeByType || {};
+  const floorByType = decay.floorByType || {};
+  const freezeDays = decay.freezeAfterInactiveDays ?? 7;
   const now = Date.now();
 
+  // Build set of frozen projects
+  const frozenProjects = new Set();
+  if (freezeDays > 0) {
+    const frozenRows = d.prepare(
+      `SELECT id FROM projects WHERE last_active_at < datetime('now', '-' || ? || ' days')`
+    ).all(freezeDays);
+    for (const r of frozenRows) frozenProjects.add(r.id);
+  }
+
   const rows = d.prepare(
-    `SELECT id, base_heat, last_accessed_at FROM facts WHERE status = 'active'`
+    `SELECT id, base_heat, last_accessed_at, fact_type, project_id FROM facts WHERE status = 'active'`
   ).all();
 
   if (rows.length === 0) return;
@@ -300,19 +348,30 @@ export function runDecaySweep(config) {
   const isoNow = new Date(now).toISOString();
   const tx = d.transaction(() => {
     let updated = 0;
+    let skipped = 0;
     for (const row of rows) {
+      // Skip frozen projects
+      if (frozenProjects.has(row.project_id)) { skipped++; continue; }
+
+      // Per-type half-life; null means never decay
+      const halfLife = row.fact_type in halfLifeByType
+        ? halfLifeByType[row.fact_type]
+        : defaultHalfLife;
+      if (halfLife === null) { skipped++; continue; }
+
+      const floor = floorByType[row.fact_type] ?? 0;
       const lastAccessed = row.last_accessed_at ? new Date(row.last_accessed_at).getTime() : now;
       const elapsedHours = (now - lastAccessed) / 3600000;
-      const newHeat = row.base_heat * Math.pow(0.5, elapsedHours / halfLifeHours);
+      const newHeat = Math.max(floor, row.base_heat * Math.pow(0.5, elapsedHours / halfLife));
       const bucket = newHeat >= 0.7 ? 'hot' : newHeat >= 0.3 ? 'warm' : 'cold';
       updateStmt.run(newHeat, bucket, isoNow, row.id);
       updated++;
     }
-    return updated;
+    return { updated, skipped };
   });
 
-  const updated = tx();
-  log.info({ updated, halfLifeHours }, 'decay sweep complete');
+  const result = tx();
+  log.info({ ...result, frozenProjects: frozenProjects.size }, 'decay sweep complete');
 }
 
 export function boostFactHeat(factIds, boost = 0.05) {

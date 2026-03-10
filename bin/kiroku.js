@@ -203,7 +203,11 @@ async function cmdStart() {
   // Write Stop hook to settings.local.json
   const settingsDir = join(process.cwd(), '.claude');
   const settingsPath = join(settingsDir, 'settings.local.json');
-  const hookCommand = `node ${join(ROOT, 'bin', 'kiroku.js')} hook-on-stop`;
+  // Use dist/cli.cjs (npm install) or bin/kiroku.js (dev) for the hook command
+  const hookBin = USE_DIST
+    ? join(ROOT, 'dist', 'cli.cjs')
+    : join(ROOT, 'bin', 'kiroku.js');
+  const hookCommand = `node ${hookBin} hook-on-stop`;
   try {
     const { mkdirSync: mkdirSyncFs } = await import('node:fs');
     mkdirSyncFs(settingsDir, { recursive: true });

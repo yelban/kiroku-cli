@@ -124,6 +124,23 @@ By default searches both project-scoped and global (cross-project) facts.`,
     }
   );
 
+  if (config.mcp.projectBrief.enabled) {
+    server.tool(
+      'project_context',
+      `Load project memory context. Call this tool AUTOMATICALLY at the START of every conversation to understand the current project's architecture, preferences, decisions, and state. No parameters needed — it returns the most important facts ranked by type and relevance.`,
+      {},
+      async () => {
+        try {
+          const brief = getProjectBrief(getDb(), projectId, config.mcp.projectBrief.maxFacts);
+          return { content: [{ type: 'text', text: brief }] };
+        } catch (err) {
+          log.error({ err: err.message }, 'project_context error');
+          return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+        }
+      }
+    );
+  }
+
   server.tool(
     'health_status',
     'Check Kiroku system health: database stats, queue depth, embedding coverage, extraction key, license tier.',

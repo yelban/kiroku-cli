@@ -384,7 +384,9 @@ MCP Gateway 啟動時 Claude 的上下文中**沒有任何記憶**。Claude 必�
 kiroku://context/project-brief
 ```
 
-Claude Code 啟動時會自動載入所有 MCP resource，不需要任何額外呼叫。
+~~Claude Code 啟動時會自動載入所有 MCP resource，不需要任何額外呼叫。~~
+
+**更正（v1.2）：** Claude Code **不會**自動載入 MCP resource。Resource 是被動的，需要用 `@` 提及才會讀取。因此改為註冊 `project_context` MCP tool（無參數），description 指示 Claude「每次對話開始時自動呼叫」，Claude 會主動調用。Resource 保留供手動 `@` 查詢。
 
 **內容生成邏輯：**
 1. 辨識當前 project（從 CWD slug）

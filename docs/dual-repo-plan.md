@@ -1,12 +1,6 @@
-# Plan: 雙 Repo 架構 — 原始碼保護 + 公開分發
+# 雙 Repo 架構 — 原始碼保護 + 公開分發
 
-## Context
-
-kiroku-v15 的 bytecode build pipeline 已完成（build.mjs --jsc），但 postinstall 需從 `github.com/yelban/kiroku-public` 的 Releases 下載 .jsc。目前兩個 repo 都不存在。需規劃 repo 結構、CI 跨 repo 發佈、初始推送流程。
-
-**不用 submodule** — 公開 repo 沒有程式碼，純粹是 Release artifact host。submodule 語義不對且增加複雜度。
-
----
+> 狀態：**已完成** (2026-03-10)
 
 ## 架構
 
@@ -16,169 +10,142 @@ yelban/kiroku-cli  (PRIVATE)              yelban/kiroku-public  (PUBLIC)
 ├── server/  site/  prompts/              └── GitHub Releases only
 ├── migrations/  scripts/                      v1.1.0/
 ├── .github/workflows/build-jsc.yml             ├── kiroku-v1.1.0-node20.tar.gz
-├── package.json (repo→yelban/kiroku-public)     ├── kiroku-v1.1.0-node22.tar.gz
+├── package.json                                ├── kiroku-v1.1.0-node22.tar.gz
 └── keys/ .env (.gitignore'd)                   └── kiroku-v1.1.0-node24.tar.gz
 ```
 
-- 所有原始碼、CI 只在 private repo
-- public repo 只有 README + LICENSE + Releases
-- `package.json` 的 `repository.url` 指向 public repo（npm 頁面連結）
-- `postinstall.cjs` 下載 URL 指向 public repo Releases（不需改）
+| 角色 | Repo | 用途 |
+|------|------|------|
+| 原始碼 + CI | `yelban/kiroku-cli` (private) | 開發、測試、build pipeline |
+| Release 分發站 | `yelban/kiroku-public` (public) | 託管 .jsc bytecode tarball |
+| npm 套件 | `@kiroku/cli` on npmjs | loaders + postinstall（7 KB） |
+
+**不用 submodule** — public repo 沒有程式碼，純粹是 Release artifact host。
 
 ---
 
-## 步驟
+## Build Pipeline
 
-### 1. 建公開 repo `yelban/kiroku-public`
+```
+node build.mjs --jsc
+
+Stage 1: esbuild → dist/*.raw.cjs      (4 CJS bundles)
+Stage 2: patch dynamic imports          (import() → __import() shim)
+Stage 3: javascript-obfuscator          → dist/*.obf.cjs
+Stage 4: bytenode compile               → dist/*.jsc
+Stage 5: generate loaders               → dist/*.cjs (thin wrappers)
+Cleanup: delete *.raw.cjs, *.obf.cjs
+```
+
+不帶 `--jsc` 時只跑 Stage 1（dev mode，同舊行為）。
+
+### npm pack 內容（7 KB）
+
+```
+@kiroku/cli-1.1.0.tgz
+├── dist/cli.cjs        (~63B loader: require('bytenode'); require('./cli.jsc'))
+├── dist/proxy.cjs      (~45B)
+├── dist/worker.cjs     (~46B)
+├── dist/mcp.cjs        (~43B)
+├── scripts/postinstall.cjs
+├── migrations/*.sql
+└── package.json
+```
+
+無 .jsc、無原始碼、無可讀 JS。
+
+---
+
+## CI Workflow
+
+檔案：`.github/workflows/build-jsc.yml`
+
+觸發：tag push (`v*`) 或 `workflow_dispatch`
+
+```
+build-jsc (matrix: Node 20/22/24)
+  ├── checkout
+  ├── npm ci --ignore-scripts     ← 跳過 postinstall（.jsc 還沒建）
+  ├── node build.mjs --jsc
+  ├── tar czf kiroku-vX.Y.Z-nodeNN.tar.gz
+  └── upload-artifact
+
+publish-release (needs: build-jsc)
+  ├── download-artifact (merge all 3)
+  └── gh release create --repo yelban/kiroku-public
+```
+
+跨 repo 發佈用 `PUBLIC_REPO_TOKEN` (Fine-Grained PAT，scope: `yelban/kiroku-public` Contents R+W)。
+
+### 踩過的坑
+
+1. **checkout ref 問題** — `workflow_dispatch` 傳入 tag 名稱作為 `ref`，但 tag 不存在於 repo → 移除 `ref` 參數，直接 checkout 預設 branch
+2. **npm ci 觸發 postinstall** — postinstall 嘗試下載尚不存在的 .jsc → 用 `--ignore-scripts` 跳過
+3. **shebang 破壞 obfuscator** — cli.cjs 的 `#!/usr/bin/env node` 被 import patch 插到中間 → Stage 2 先剝離 shebang
+4. **ESM 專案中 CJS postinstall** — `package.json` 有 `"type": "module"`，`require()` 不可用 → 改名 `postinstall.cjs`
+
+---
+
+## 發版流程
 
 ```bash
-gh repo create yelban/kiroku-public --public \
-  --description "AI-powered memory system for Claude Code"
+# 1. 在 kiroku-cli (private) 操作
+npm version patch                # bump version + create tag
+
+# 2. 推送觸發 CI
+git push && git push --tags      # CI → build .jsc → upload to kiroku-public
+
+# 3. 等 CI 完成（~1 分鐘）
+gh run list --repo yelban/kiroku-cli --limit 1
+
+# 4. 發佈到 npm
+npm publish                      # 只包含 loaders + postinstall
 ```
 
-本地初始化推一個 README + LICENSE：
+使用者體驗：
+```bash
+npm install -g @kiroku/cli
+# postinstall 自動從 kiroku-public 下載 .jsc（~1.7 MB）
+kiroku help
+```
+
+### 手動測試 CI（不建 tag）
 
 ```bash
-mkdir /tmp/kiroku-public && cd /tmp/kiroku-public
-git init && git branch -M main
-# 建 README（使用者導向：安裝方式、功能簡介）
-# 建 LICENSE（proprietary / UNLICENSED）
-git add -A && git commit -m "Initial commit"
-git remote add origin git@github.com:yelban/kiroku-public.git
-git push -u origin main
-```
-
-### 2. 建私有 repo `yelban/kiroku-cli`
-
-```bash
-gh repo create yelban/kiroku-cli --private \
-  --description "Kiroku CLI source (private)"
-```
-
-把 kiroku-v15 推上去：
-
-```bash
-cd /Users/orz99/zoo/claude-proxy/kiroku-v15
-# 確認 .gitignore 已涵蓋 keys/ .env dist/ 等
-git remote add origin git@github.com:yelban/kiroku-cli.git
-git add -A && git commit -m "Initial commit: full source"
-git branch -M main && git push -u origin main
-```
-
-### 3. 設定 CI 跨 repo 發佈 Secret
-
-GitHub Settings → Developer Settings → Fine-Grained PAT：
-- Name: `kiroku-release-publisher`
-- Repo access: Only `yelban/kiroku-public`
-- Permissions: Contents (Read+Write)
-
-存到私有 repo：
-```bash
-gh secret set PUBLIC_REPO_TOKEN --repo yelban/kiroku-cli
-```
-
-### 4. 改寫 `.github/workflows/build-jsc.yml`
-
-現有 workflow 用 `softprops/action-gh-release` 直接在同 repo 發 release，不支援跨 repo。改為兩個 job：
-
-```yaml
-name: Build V8 Bytecode
-on:
-  push:
-    tags: ['v*']
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag (e.g. v1.2.0)'
-        required: true
-
-jobs:
-  build-jsc:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node: [20, 22, 24]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '${{ matrix.node }}' }
-      - run: npm ci
-      - run: node build.mjs --jsc
-        env: { BUILD_JSC: '1' }
-      - name: Package
-        run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          cd dist && tar czf "../kiroku-${TAG}-node${{ matrix.node }}.tar.gz" \
-            cli.jsc proxy.jsc worker.jsc mcp.jsc
-      - uses: actions/upload-artifact@v4
-        with:
-          name: jsc-node${{ matrix.node }}
-          path: kiroku-*.tar.gz
-
-  publish-release:
-    needs: build-jsc
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with: { merge-multiple: true }
-      - name: Publish to public repo
-        env:
-          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
-        run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          gh release create "$TAG" --repo yelban/kiroku-public \
-            --title "$TAG" --notes "Bytecode release for $TAG" \
-            kiroku-*.tar.gz 2>/dev/null || \
-          gh release upload "$TAG" --repo yelban/kiroku-public \
-            --clobber kiroku-*.tar.gz
-```
-
-**關鍵差異**：
-- matrix build → `upload-artifact`（中繼）
-- `publish-release` 等全部 build 完成 → 一次性 `gh release create --repo yelban/kiroku-public`
-- 用 `PUBLIC_REPO_TOKEN` 存取公開 repo
-
-### 5. package.json 微調
-
-```diff
-+ "bugs": { "url": "https://github.com/yelban/kiroku-public/issues" },
-+ "homepage": "https://github.com/yelban/kiroku-public#readme",
-```
-
-`repository.url` 已指向 `yelban/kiroku-public`，不需改。
-
-### 6. .gitignore 補充（推送前確認）
-
-```
-server/.wrangler/
-site/node_modules/
+gh workflow run build-jsc.yml --repo yelban/kiroku-cli --field tag=v1.1.0
 ```
 
 ---
 
-## 發版流程（日常）
+## Secrets & Tokens
 
-```bash
-# 在 kiroku-cli (private) 操作
-npm version patch              # bump + tag
-git push && git push --tags    # 觸發 CI → .jsc → yelban/kiroku-public Releases
-# 等 CI 完成
-npm publish                    # 發佈到 npmjs @kiroku/cli
-```
+| Secret | 位置 | 用途 | 過期 |
+|--------|------|------|------|
+| `PUBLIC_REPO_TOKEN` | kiroku-cli repo secret | 跨 repo 建 release | Fine-Grained PAT，最長 1 年 |
+| npm token | `~/.npmrc` | npm publish | bypass 2FA token |
 
-使用者 `npm install -g @kiroku/cli` → postinstall 自動從公開 repo 下載 .jsc。
+**注意**：Fine-Grained PAT 最長 1 年，需設提醒續約。
 
 ---
 
-## 不做
+## 本地開發目錄
 
-- 不用 submodule（公開 repo 無程式碼可引用）
-- 不用 platform-specific npm packages（.jsc 多了 node version 維度，需 9+ 個包，太繁瑣）
-- 不同步 CHANGELOG 到公開 repo（release notes 寫在 release body 即可）
-- 公開 repo 暫不開 Issues（視營運需求後續決定）
+```
+~/zoo/kiroku-cli/        ← git clone git@github.com:yelban/kiroku-cli.git
+  ├── 日常開發在此
+  ├── npm run build      (dev mode，不需 --jsc)
+  ├── npm test           (145 tests)
+  └── git push           (推到 private repo)
+```
 
-## 未解決
+開發時不需要 bytecode，`npm run build` 產生普通 CJS。
+只有 CI（tag push）和手動 `npm run build:jsc` 才走完整 bytecode pipeline。
 
-- Fine-Grained PAT 有效期最長 1 年，需設提醒續約
-- 公開 repo 的 README 內容待撰寫（安裝指南 + 功能簡介）
-- server/ (CF Worker) 和 site/ 是否未來獨立 repo — 暫保持在 kiroku-cli 內
+---
+
+## 環境變數
+
+| 變數 | 用途 |
+|------|------|
+| `BUILD_JSC=1` | postinstall 跳過下載（CI/本地 build 時設） |
+| `KIROKU_JSC_URL` | 覆蓋 .jsc 下載 URL（企業 proxy/mirror） |

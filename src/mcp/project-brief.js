@@ -1,7 +1,3 @@
-import { createLogger } from '../shared/logger.js';
-
-const log = createLogger('project-brief');
-
 export function getProjectBrief(db, projectId, maxFacts) {
   const rows = db.prepare(`
     SELECT f.fact_type, f.predicate, f.object_text, f.heat, f.scope,
@@ -19,7 +15,7 @@ export function getProjectBrief(db, projectId, maxFacts) {
         WHEN 'episodic'   THEN 4
         ELSE 5
       END,
-      f.heat DESC
+      f.heat * (1.0 + MIN(f.access_count, 20) * 0.1) DESC
     LIMIT ?
   `).all(projectId, maxFacts);
 

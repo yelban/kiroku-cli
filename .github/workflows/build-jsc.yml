@@ -17,8 +17,6 @@ jobs:
         node: [20, 22, 24]
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: actions/setup-node@v4
         with:

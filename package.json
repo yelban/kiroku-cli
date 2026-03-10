@@ -1,0 +1,54 @@
+{
+  "name": "@kiroku/cli",
+  "version": "1.1.0",
+  "description": "AI-powered memory system for Claude Code — MCP Server & Proxy",
+  "type": "module",
+  "main": "dist/cli.cjs",
+  "bin": {
+    "kiroku": "dist/cli.cjs"
+  },
+  "files": [
+    "dist/*.cjs",
+    "migrations/",
+    "scripts/postinstall.cjs"
+  ],
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yelban/kiroku-public.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yelban/kiroku-public/issues"
+  },
+  "homepage": "https://github.com/yelban/kiroku-public#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "build:jsc": "node build.mjs --jsc",
+    "postinstall": "node scripts/postinstall.cjs",
+    "prepublishOnly": "npm run build",
+    "start": "node bin/kiroku.js start",
+    "stop": "node bin/kiroku.js stop",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.4.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "better-sqlite3": "^11.8.0",
+    "bytenode": "^1.5.7",
+    "eventsource-parser": "^3.0.1",
+    "nanoid": "^5.1.0",
+    "pino": "^9.6.0",
+    "sqlite-vec": "^0.1.6",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.3",
+    "javascript-obfuscator": "^4.1.1",
+    "pino-pretty": "^13.0.0",
+    "vitest": "^3.0.0"
+  }
+}

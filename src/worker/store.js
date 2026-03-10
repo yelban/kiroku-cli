@@ -1,0 +1,334 @@
+import crypto from 'node:crypto';
+import { createLogger } from '../shared/logger.js';
+import { turnId, entityId, factId, jobId as makeJobId } from '../shared/ids.js';
+import { isVecEnabled } from '../shared/db.js';
+import { writeAudit } from '../shared/audit.js';
+
+const log = createLogger('store');
+
+let _db = null;
+
+export function setDb(database) {
+  _db = database;
+}
+
+export function storeTurn(event) {
+  const d = _db;
+  if (!d) throw new Error('DB not set');
+
+  const projectId = event.project_id || 'default';
+  const conversationId = event.conversation_id || 'unknown';
+
+  // Ensure project exists
+  d.prepare(`INSERT OR IGNORE INTO projects (id, name) VALUES (?, ?)`).run(projectId, projectId);
+
+  // Ensure conversation exists
+  d.prepare(`INSERT OR IGNORE INTO conversations (id, project_id, auth_mode, system_hash, started_at) VALUES (?, ?, ?, ?, ?)`)
+    .run(conversationId, projectId, event.auth_mode || 'unknown', event.request?.system_hash || null, event.captured_at);
+
+  // Store user turn
+  let userTurnId = null;
+  const userText = event.request?.user_text || '';
+  if (userText.trim()) {
+    userTurnId = turnId();
+    d.prepare(`INSERT OR IGNORE INTO turns (id, conversation_id, project_id, turn_index, role, text, text_sha256, model, stop_reason, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(userTurnId, conversationId, projectId, event.turn_index * 2, 'user', userText,
+        crypto.createHash('sha256').update(userText).digest('hex'), null, null, event.captured_at);
+  }
+
+  // Store assistant turn
+  let assistantTurnId = null;
+  const asstText = event.response?.assistant_text || '';
+  if (asstText.trim()) {
+    assistantTurnId = turnId();
+    d.prepare(`INSERT OR IGNORE INTO turns (id, conversation_id, project_id, turn_index, role, text, text_sha256, model, stop_reason, input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(assistantTurnId, conversationId, projectId, event.turn_index * 2 + 1, 'assistant', asstText,
+        crypto.createHash('sha256').update(asstText).digest('hex'),
+        event.request?.model || null, event.response?.stop_reason || null,
+        event.usage?.input_tokens || 0, event.usage?.output_tokens || 0,
+        event.usage?.cache_read_input_tokens || 0, event.usage?.cache_creation_input_tokens || 0,
+        event.captured_at);
+  }
+
+  return { userTurnId, assistantTurnId };
+}
+
+export function storeEntities(entities, projectId) {
+  const d = _db;
+  if (!d) throw new Error('DB not set');
+
+  const now = new Date().toISOString();
+  const entityMap = new Map(); // canonical_name -> entity_id
+
+  for (const entity of entities) {
+    const name = entity.canonical_name;
+    if (!name) continue;
+
+    // Check if entity already exists
+    const existing = d.prepare('SELECT id FROM entities WHERE canonical_name = ?').get(name);
+
+    if (existing) {
+      entityMap.set(name, existing.id);
+      // Update last_seen_at
+      d.prepare('UPDATE entities SET last_seen_at = ?, updated_at = ? WHERE id = ?')
+        .run(now, now, existing.id);
+    } else {
+      const id = entityId();
+      d.prepare('INSERT INTO entities (id, canonical_name, entity_type, aliases_json, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, name, entity.entity_type || 'concept', JSON.stringify(entity.aliases || []), now, now);
+      entityMap.set(name, id);
+    }
+  }
+
+  return entityMap;
+}
+
+export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseState) {
+  const d = _db;
+  if (!d) throw new Error('DB not set');
+
+  const now = new Date().toISOString();
+  const factIds = [];
+
+  // Freemium eviction: enforce fact limit
+  if (licenseState && !licenseState.licensed) {
+    evictIfOverLimit(d, licenseState.factLimit, facts.length, now);
+  }
+
+  for (const fact of facts) {
+    const subjectEntityId = entityMap.get(fact.subject) || null;
+    const scope = fact.scope || (fact.fact_type === 'preference' ? 'global' : 'project');
+
+    // Check for existing active fact with same subject+predicate+scope → supersede
+    if (subjectEntityId) {
+      const existing = d.prepare(
+        `SELECT id FROM facts WHERE project_id = ? AND subject_entity_id = ? AND predicate = ? AND scope = ? AND status = 'active'`
+      ).get(projectId, subjectEntityId, fact.predicate, scope);
+
+      if (existing) {
+        d.prepare(`UPDATE facts SET status = 'superseded', updated_at = ? WHERE id = ?`).run(now, existing.id);
+      }
+    }
+
+    const fid = factId();
+    d.prepare(`INSERT INTO facts (id, project_id, subject_entity_id, predicate, object_text, fact_type, confidence, heat, decay_bucket, source_turn_id, scope, status, base_heat, last_accessed_at, access_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(fid, projectId, subjectEntityId, fact.predicate, fact.object,
+        fact.fact_type || 'semantic', fact.confidence || 0.5, 0.7, 'hot', sourceTurnId, scope, 'active',
+        0.7, now, 0);
+
+    writeAudit(d, { projectId, action: 'extract', targetType: 'fact', targetId: fid, detail: { subject: fact.subject, predicate: fact.predicate } });
+    factIds.push(fid);
+  }
+
+  return factIds;
+}
+
+export function storeEmbeddings(factIds, embeddings, projectId, facts) {
+  if (!isVecEnabled()) {
+    log.debug('vec not available, skipping embeddings');
+    return;
+  }
+
+  const d = _db;
+  if (!d) throw new Error('DB not set');
+
+  const stmt = d.prepare(
+    `INSERT INTO fact_embeddings (fact_id, project_id, scope, fact_type, status, embedding) VALUES (?, ?, ?, ?, ?, ?)`
+  );
+
+  for (let i = 0; i < factIds.length; i++) {
+    if (i >= embeddings.length) break;
+    const fact = facts[i] || {};
+    const scope = fact.scope || (fact.fact_type === 'preference' ? 'global' : 'project');
+    const embedding = new Float32Array(embeddings[i]);
+    stmt.run(factIds[i], projectId, scope, fact.fact_type || 'semantic', 'active', Buffer.from(embedding.buffer));
+  }
+}
+
+export function createExtractionJob(jid, queueFile, eventId) {
+  const d = _db;
+  if (!d) return;
+  d.prepare('INSERT INTO extraction_jobs (id, queue_file, queue_event_id) VALUES (?, ?, ?)').run(jid, queueFile, eventId);
+}
+
+export function updateExtractionJob(jid, updates) {
+  const d = _db;
+  if (!d) return;
+
+  const fields = [];
+  const values = [];
+  for (const [key, val] of Object.entries(updates)) {
+    const col = key.replace(/([A-Z])/g, '_$1').toLowerCase(); // camelCase to snake_case
+    fields.push(`${col} = ?`);
+    values.push(val);
+  }
+  fields.push('updated_at = ?');
+  values.push(new Date().toISOString());
+  values.push(jid);
+
+  d.prepare(`UPDATE extraction_jobs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+// For manual saves from MCP gateway
+export function saveFactManually({ subject, predicate, object, factType, projectId, scope, licenseState }) {
+  const d = _db;
+  if (!d) throw new Error('DB not set');
+
+  const resolvedScope = scope || (factType === 'preference' ? 'global' : 'project');
+  const now = new Date().toISOString();
+
+  // Freemium eviction
+  if (licenseState && !licenseState.licensed) {
+    evictIfOverLimit(d, licenseState.factLimit, 1, now);
+  }
+
+  // Ensure project exists
+  d.prepare('INSERT OR IGNORE INTO projects (id, name) VALUES (?, ?)').run(projectId, projectId);
+
+  // Find or create entity
+  let subjectEntityId;
+  const existing = d.prepare('SELECT id FROM entities WHERE canonical_name = ?').get(subject);
+  if (existing) {
+    subjectEntityId = existing.id;
+    d.prepare('UPDATE entities SET last_seen_at = ?, updated_at = ? WHERE id = ?').run(now, now, subjectEntityId);
+  } else {
+    subjectEntityId = entityId();
+    d.prepare('INSERT INTO entities (id, canonical_name, entity_type, aliases_json, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(subjectEntityId, subject, 'concept', '[]', now, now);
+  }
+
+  // Supersede existing (same scope only)
+  const existingFact = d.prepare(
+    `SELECT id FROM facts WHERE project_id = ? AND subject_entity_id = ? AND predicate = ? AND scope = ? AND status = 'active'`
+  ).get(projectId, subjectEntityId, predicate, resolvedScope);
+  if (existingFact) {
+    d.prepare(`UPDATE facts SET status = 'superseded', updated_at = ? WHERE id = ?`).run(now, existingFact.id);
+  }
+
+  // Insert new fact
+  const fid = factId();
+  d.prepare(`INSERT INTO facts (id, project_id, subject_entity_id, predicate, object_text, fact_type, confidence, heat, decay_bucket, source_turn_id, scope, status, base_heat, last_accessed_at, access_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(fid, projectId, subjectEntityId, predicate, object, factType || 'semantic', 1.0, 1.0, 'hot', null, resolvedScope, 'active',
+      1.0, now, 0);
+
+  return fid;
+}
+
+export function archiveFacts({ factId: fid, subject, predicate, projectId }) {
+  const d = _db;
+  if (!d) throw new Error('DB not set');
+
+  const now = new Date().toISOString();
+  const archived = [];
+
+  if (fid) {
+    d.prepare(`UPDATE facts SET status = 'archived', decay_bucket = 'archived', updated_at = ? WHERE id = ?`).run(now, fid);
+    archived.push(fid);
+  } else if (subject || predicate) {
+    // Search both project-scoped and global facts
+    let sql = `SELECT f.id FROM facts f LEFT JOIN entities e ON f.subject_entity_id = e.id WHERE (f.project_id = ? OR f.scope = 'global') AND f.status = 'active'`;
+    const params = [projectId];
+    if (subject) { sql += ` AND e.canonical_name LIKE ?`; params.push(`%${subject}%`); }
+    if (predicate) { sql += ` AND f.predicate LIKE ?`; params.push(`%${predicate}%`); }
+
+    const rows = d.prepare(sql).all(...params);
+    for (const row of rows) {
+      d.prepare(`UPDATE facts SET status = 'archived', decay_bucket = 'archived', updated_at = ? WHERE id = ?`).run(now, row.id);
+      archived.push(row.id);
+    }
+  }
+
+  // Sync fact_embeddings status so vector search excludes archived facts
+  if (archived.length > 0 && isVecEnabled()) {
+    for (const id of archived) {
+      try {
+        d.prepare(`UPDATE fact_embeddings SET status = 'archived' WHERE fact_id = ?`).run(id);
+      } catch { /* embedding may not exist */ }
+    }
+  }
+
+  return archived;
+}
+
+function evictIfOverLimit(d, factLimit, incoming, now) {
+  if (!factLimit || factLimit === Infinity) return;
+
+  const activeCount = d.prepare("SELECT COUNT(*) as c FROM facts WHERE status = 'active'").get().c;
+  const overflow = (activeCount + incoming) - factLimit;
+  if (overflow <= 0) return;
+
+  // Evict coldest facts: lowest heat, prefer cold/warm bucket, oldest first
+  const victims = d.prepare(
+    `SELECT id FROM facts WHERE status = 'active'
+     ORDER BY heat ASC, CASE decay_bucket WHEN 'cold' THEN 0 WHEN 'warm' THEN 1 ELSE 2 END, created_at ASC
+     LIMIT ?`
+  ).all(overflow);
+
+  for (const v of victims) {
+    d.prepare(`UPDATE facts SET status = 'evicted', decay_bucket = 'evicted', updated_at = ? WHERE id = ?`).run(now, v.id);
+    writeAudit(d, { projectId: 'system', action: 'evict', targetType: 'fact', targetId: v.id });
+    if (isVecEnabled()) {
+      try { d.prepare(`DELETE FROM fact_embeddings WHERE fact_id = ?`).run(v.id); } catch { /* ok */ }
+    }
+  }
+
+  if (victims.length > 0) {
+    log.info({ evicted: victims.length, limit: factLimit }, 'freemium fact eviction');
+  }
+}
+
+export function runDecaySweep(config) {
+  const d = _db;
+  if (!d) return;
+
+  const decay = config.worker?.decay;
+  if (!decay?.enabled) return;
+
+  const halfLifeHours = decay.halfLifeHours || 168;
+  const now = Date.now();
+
+  const rows = d.prepare(
+    `SELECT id, base_heat, last_accessed_at FROM facts WHERE status = 'active'`
+  ).all();
+
+  if (rows.length === 0) return;
+
+  const updateStmt = d.prepare(
+    `UPDATE facts SET heat = ?, decay_bucket = ?, updated_at = ? WHERE id = ?`
+  );
+
+  const isoNow = new Date(now).toISOString();
+  const tx = d.transaction(() => {
+    let updated = 0;
+    for (const row of rows) {
+      const lastAccessed = row.last_accessed_at ? new Date(row.last_accessed_at).getTime() : now;
+      const elapsedHours = (now - lastAccessed) / 3600000;
+      const newHeat = row.base_heat * Math.pow(0.5, elapsedHours / halfLifeHours);
+      const bucket = newHeat >= 0.7 ? 'hot' : newHeat >= 0.3 ? 'warm' : 'cold';
+      updateStmt.run(newHeat, bucket, isoNow, row.id);
+      updated++;
+    }
+    return updated;
+  });
+
+  const updated = tx();
+  log.info({ updated, halfLifeHours }, 'decay sweep complete');
+}
+
+export function boostFactHeat(factIds, boost = 0.05) {
+  const d = _db;
+  if (!d || !factIds?.length) return;
+
+  const now = new Date().toISOString();
+  const stmt = d.prepare(
+    `UPDATE facts SET last_accessed_at = ?, access_count = access_count + 1, base_heat = MIN(base_heat + ?, 1.0), updated_at = ? WHERE id = ? AND status = 'active'`
+  );
+
+  const tx = d.transaction(() => {
+    for (const fid of factIds) {
+      stmt.run(now, boost, now, fid);
+    }
+  });
+
+  tx();
+}

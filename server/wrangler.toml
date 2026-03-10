@@ -1,0 +1,12 @@
+name = "kiroku-api"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "583074c1ef854659bbc886d33a2c7601"
+
+# Secrets (set via `wrangler secret put <NAME>`):
+# LS_API_KEY        — Lemon Squeezy API key
+# LS_WEBHOOK_SECRET — Lemon Squeezy webhook signing secret
+# PROMPT_ADMIN_KEY  — Admin key for prompt updates

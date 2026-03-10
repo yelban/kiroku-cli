@@ -1,0 +1,268 @@
+import { readdirSync, readFileSync, renameSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { QUEUE_INCOMING, QUEUE_PROCESSING, QUEUE_DONE, QUEUE_DEAD, WORKER_STATE_PATH } from '../shared/paths.js';
+import { writeFileSync, unlinkSync } from 'node:fs';
+import { loadConfig } from '../shared/config.js';
+import { createLogger } from '../shared/logger.js';
+import { initDb, runMigrations, closeDb } from '../shared/db.js';
+import { jobId } from '../shared/ids.js';
+import { extract, setPromptProvider } from './extractor.js';
+import { embedTexts, initEmbedder } from './embedder.js';
+import { initPromptLoader, getPrompt, stopPromptLoader } from './prompt-loader.js';
+import { setDb, storeTurn, storeEntities, storeFacts, storeEmbeddings, createExtractionJob, updateExtractionJob, runDecaySweep } from './store.js';
+import { getLicenseState } from '../license/license-state.js';
+
+const log = createLogger('worker');
+
+let running = false;
+let pollTimer = null;
+let decayTimer = null;
+let _licenseState = null;
+let _dailyExtractCount = 0;
+let _dailyExtractDate = '';
+const _retryAttempts = new Map(); // filename -> { count, nextAttemptAfter }
+
+export async function startWorker() {
+  const config = loadConfig();
+  if (!config.worker.enabled) {
+    log.info('worker disabled in config');
+    return;
+  }
+
+  log.info('initializing worker');
+
+  // Initialize DB
+  const db = await initDb();
+  runMigrations();
+  setDb(db);
+
+  // Load license state
+  _licenseState = await getLicenseState();
+  log.info({ licensed: _licenseState.licensed, tier: _licenseState.tier }, 'license state loaded');
+
+  // Initialize prompt loader (3-layer: memory → disk cache → remote)
+  await initPromptLoader();
+  setPromptProvider(getPrompt);
+  log.info('prompt loader initialized');
+
+  // Pre-warm embedding model (skip if free tier with embedding disabled)
+  if (_licenseState.embeddingEnabled) {
+    log.info('loading embedding model (first run may download ~600MB)');
+    await initEmbedder(config.worker.embedding);
+    log.info('embedding model ready');
+  } else {
+    log.info('embedding disabled (free tier)');
+  }
+
+  running = true;
+  writeFileSync(WORKER_STATE_PATH, JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  }));
+
+  // Run initial decay sweep
+  if (config.worker.decay.enabled) {
+    try { runDecaySweep(config); } catch (err) { log.warn({ err: err.message }, 'initial decay sweep failed'); }
+    decayTimer = setInterval(() => {
+      try { runDecaySweep(config); } catch (err) { log.warn({ err: err.message }, 'decay sweep failed'); }
+    }, config.worker.decay.sweepIntervalMs);
+  }
+
+  // Start polling
+  const pollInterval = config.worker.pollIntervalMs;
+  pollTimer = setInterval(() => pollQueue(config), pollInterval);
+  log.info({ pollInterval }, 'worker started');
+
+  // Also poll immediately
+  pollQueue(config);
+}
+
+async function pollQueue(config) {
+  if (!running) return;
+
+  // Reset daily counter at midnight
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== _dailyExtractDate) {
+    _dailyExtractCount = 0;
+    _dailyExtractDate = today;
+  }
+
+  // Check daily extract limit (free tier)
+  if (_licenseState && !_licenseState.licensed && _dailyExtractCount >= _licenseState.dailyExtractLimit) {
+    log.debug({ count: _dailyExtractCount, limit: _licenseState.dailyExtractLimit }, 'daily extract limit reached');
+    return;
+  }
+
+  try {
+    const files = readdirSync(QUEUE_INCOMING)
+      .filter(f => f.endsWith('.jsonl') && !f.startsWith('.'))
+      .sort(); // Process in order
+
+    const now = Date.now();
+    for (const file of files.slice(0, config.worker.maxConcurrentJobs)) {
+      // Re-check limit before each file
+      if (_licenseState && !_licenseState.licensed && _dailyExtractCount >= _licenseState.dailyExtractLimit) {
+        log.warn({ count: _dailyExtractCount }, 'daily extract limit reached, skipping remaining');
+        break;
+      }
+      // Skip files still in backoff window
+      const retry = _retryAttempts.get(file);
+      if (retry && now < retry.nextAttemptAfter) continue;
+      await processFile(file, config);
+      _dailyExtractCount++;
+    }
+  } catch (err) {
+    log.error({ err: err.message }, 'poll error');
+  }
+}
+
+async function processFile(filename, config) {
+  const srcPath = join(QUEUE_INCOMING, filename);
+  const processingPath = join(QUEUE_PROCESSING, filename);
+  const donePath = join(QUEUE_DONE, filename);
+  const deadPath = join(QUEUE_DEAD, filename);
+
+  try {
+    // Atomic move to processing
+    renameSync(srcPath, processingPath);
+  } catch (err) {
+    // File already being processed or gone
+    return;
+  }
+
+  let event;
+  try {
+    const content = readFileSync(processingPath, 'utf8').trim();
+    event = JSON.parse(content);
+  } catch (err) {
+    log.error({ filename, err: err.message }, 'failed to parse queue file');
+    renameSync(processingPath, deadPath);
+    return;
+  }
+
+  const jid = jobId();
+  createExtractionJob(jid, filename, event.event_id);
+
+  try {
+    updateExtractionJob(jid, { status: 'processing', startedAt: new Date().toISOString() });
+
+    // 1. Store the turn
+    const turnData = storeTurn(event);
+
+    // 2. Extract entities and facts via LLM
+    const combinedText = [event.request?.user_text, event.response?.assistant_text]
+      .filter(Boolean).join('\n\n---\n\n');
+
+    if (!combinedText.trim()) {
+      updateExtractionJob(jid, { status: 'done', finishedAt: new Date().toISOString() });
+      renameSync(processingPath, donePath);
+      log.info({ jid, eventId: event.event_id }, 'skipped (no text)');
+      return;
+    }
+
+    const extraction = await extractWithRetry(combinedText, config);
+
+    // 3. Store entities and facts
+    const entityMap = storeEntities(extraction.entities, event.project_id);
+    const factIds = storeFacts(extraction.facts, entityMap, event.project_id, turnData.assistantTurnId, _licenseState);
+
+    // 4. Generate embeddings for facts (skip if free tier)
+    if (factIds.length > 0 && (!_licenseState || _licenseState.embeddingEnabled)) {
+      const factTexts = extraction.facts.map(f => `${f.subject} ${f.predicate} ${f.object}`);
+      const embeddings = await embedTexts(factTexts);
+      storeEmbeddings(factIds, embeddings, event.project_id, extraction.facts);
+    }
+
+    updateExtractionJob(jid, {
+      status: 'done',
+      provider: config.worker.extraction.provider,
+      model: config.worker.extraction.model,
+      finishedAt: new Date().toISOString(),
+    });
+
+    renameSync(processingPath, donePath);
+    log.info({ jid, eventId: event.event_id, entities: extraction.entities.length, facts: extraction.facts.length }, 'processed');
+
+  } catch (err) {
+    const retry = _retryAttempts.get(filename) || { count: 0 };
+    const attempt = retry.count + 1;
+    const maxAttempts = config.worker.retry.maxAttempts;
+
+    log.error({ jid, attempt, maxAttempts, err: err.message }, 'processing failed');
+    updateExtractionJob(jid, {
+      status: attempt >= maxAttempts ? 'failed' : 'retrying',
+      lastError: err.message,
+      attempts: attempt,
+    });
+
+    if (attempt >= maxAttempts) {
+      renameSync(processingPath, deadPath);
+      _retryAttempts.delete(filename);
+      log.warn({ jid, filename, attempts: attempt }, 'moved to dead-letter after max retries');
+    } else {
+      // Move back to incoming with exponential backoff delay
+      renameSync(processingPath, srcPath);
+      const delay = Math.min(
+        config.worker.retry.baseDelayMs * Math.pow(2, attempt - 1),
+        config.worker.retry.maxDelayMs,
+      );
+      _retryAttempts.set(filename, { count: attempt, nextAttemptAfter: Date.now() + delay });
+      log.info({ jid, filename, attempt, delay }, 'scheduled retry');
+    }
+  }
+}
+
+async function extractWithRetry(text, config) {
+  const maxAttempts = config.worker.retry.maxAttempts;
+  let lastErr;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await extract(text, config.worker.extraction);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        const delay = Math.min(
+          config.worker.retry.baseDelayMs * Math.pow(2, attempt - 1),
+          config.worker.retry.maxDelayMs,
+        );
+        log.warn({ attempt, delay, err: err.message }, 'extraction retry');
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+
+  throw lastErr;
+}
+
+export function stopWorker() {
+  running = false;
+  stopPromptLoader();
+  if (decayTimer) {
+    clearInterval(decayTimer);
+    decayTimer = null;
+  }
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  closeDb();
+  try { if (existsSync(WORKER_STATE_PATH)) unlinkSync(WORKER_STATE_PATH); } catch {}
+  log.info('worker stopped');
+}
+
+process.on('SIGTERM', () => { stopWorker(); process.exit(0); });
+process.on('SIGINT', () => { stopWorker(); process.exit(0); });
+process.on('SIGUSR1', () => {
+  log.info('SIGUSR1 received, immediate poll');
+  const config = loadConfig();
+  pollQueue(config);
+});
+
+// Auto-start when spawned as daemon or run directly
+if (process.env.KIROKU_DAEMON === '1' || process.argv[1]?.endsWith('worker.js')) {
+  startWorker().catch(err => {
+    console.error('Worker fatal:', err);
+    process.exit(1);
+  });
+}

@@ -1,0 +1,157 @@
+# Kiroku V15
+
+Compliant AI memory gateway for Claude Code. Side-records conversations, extracts knowledge via LLM, and serves it back through MCP tools.
+
+```
+Claude Code ──req──▶ Proxy ──passthrough──▶ api.anthropic.com
+                       │ (SSE side-recording)
+                       └──▶ .jsonl queue ──▶ Worker ──▶ SQLite + vec0
+                                                           ▲
+Claude Code ◀── MCP stdio ◀── MCP Gateway ────────────────┘
+```
+
+## Features
+
+- **Zero-latency proxy** — Transparent passthrough with SSE side-recording, no added latency
+- **Automatic knowledge extraction** — Background LLM extraction of entities and facts from every conversation
+- **Local vector search** — bge-m3 embeddings (1024 dims, q8) stored in sqlite-vec for semantic retrieval
+- **5 MCP tools** — `memory_search`, `memory_save`, `memory_forget`, `sql_readonly`, `health_status`
+- **DLP redaction** — Strips AWS keys, API tokens, GitHub PATs before storage
+- **Multi-project isolation** — Facts and entities scoped by project ID
+- **One-command launch** — `kiroku start` spawns proxy + worker + MCP + Claude Code
+
+## Quick Start
+
+```bash
+# Install globally
+npm install -g @kiroku/cli
+
+# Configure extraction API key
+export OPENROUTER_API_KEY=sk-or-v1-your-key-here
+
+# Launch (auto-initializes on first run)
+cd your-project-directory
+kiroku start
+```
+
+First run auto-creates `~/.kiroku/` and downloads the embedding model (~600MB). Subsequent starts take <3 seconds.
+
+See [docs/quickstart.md](docs/quickstart.md) for the full setup guide.
+
+## Architecture
+
+Three independent Node.js ESM modules:
+
+| Module | Path | Role |
+|--------|------|------|
+| **kiroku-aegis-proxy** | `src/proxy/` | HTTP passthrough, DLP redaction, SSE side-recording → .jsonl queue |
+| **kiroku-memory-worker** | `src/worker/` | Queue polling, LLM extraction (OpenRouter/Ollama), bge-m3 embedding, SQLite write |
+| **kiroku-mcp-gateway** | `src/mcp/` | MCP stdio server with 4 tools + 1 resource |
+
+### Source Files (29)
+
+```
+bin/kiroku.js              CLI: init/start/stop/status/doctor/export/reindex/transcript/activate/deactivate/license
+build.mjs                  esbuild: src/ → dist/ (4 CJS bundles: proxy, worker, mcp, cli)
+src/shared/   (10 files)   config, db, logger, paths, ids, redact, session-resolver, constants, health, audit
+src/proxy/    (5 files)    server, classifier, sse-recorder, queue-writer, md-logger
+src/worker/   (6 files)    worker, extractor, embedder, store, prompt-loader, prompt-crypto
+src/mcp/      (5 files)    server, memory-search, memory-write, sql-sandbox, health-status
+src/cli/      (1 file)     transcript-converter
+src/license/  (3 files)    Ed25519 verify, machine-id, license-state (LS validate + offline grace)
+server/       (CF Worker)  prompt API, LS webhook, prompt admin
+```
+
+## CLI
+
+```bash
+kiroku init                # Create ~/.kiroku/ directory tree, config, and database
+kiroku start               # Start proxy + worker + MCP, launch Claude Code
+kiroku stop                # Stop all background daemons
+kiroku status              # Report component states, DB stats, queue counts
+kiroku doctor              # Health check: config, DB, sqlite-vec, model, API keys, license
+kiroku export              # Export memory data to markdown
+kiroku reindex             # Rebuild missing embeddings
+kiroku transcript --list   # List available Claude Code sessions
+kiroku transcript <id>     # Convert session to readable markdown
+kiroku activate <key>      # Activate a Kiroku Pro license
+kiroku deactivate          # Deactivate current license
+kiroku license             # Show license status
+```
+
+All `claude` CLI flags pass through: `kiroku start -c`, `kiroku start --resume`, etc.
+
+## MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `memory_search` | Semantic vector search (KNN) with text search fallback |
+| `memory_save` | Save a fact with immediate embedding generation |
+| `memory_forget` | Archive facts by ID or subject+predicate |
+| `sql_readonly` | Sandboxed read-only SQL against the memory database |
+| `health_status` | System health: DB stats, queue depth, embedding coverage, license tier |
+
+## Storage
+
+All runtime data lives in `~/.kiroku/`:
+
+```
+~/.kiroku/
+├── config.json              # User configuration (Zod-validated)
+├── data/
+│   ├── memory.sqlite        # SQLite + WAL + sqlite-vec
+│   └── queue/{incoming,processing,done,dead-letter}/
+├── logs/{proxy,worker,mcp}.log
+└── run/{proxy,worker}.state.json
+```
+
+**Database schema:** 7 tables (`projects`, `conversations`, `turns`, `entities`, `facts`, `extraction_jobs`, `audit_logs`) + `fact_embeddings` vec0 virtual table.
+
+## Security
+
+Five red lines enforced:
+
+| # | Rule |
+|---|------|
+| R1 | No keepalive in session mode (Pro/Max subscription protection) |
+| R2 | No dynamic CLAUDE.md modification (one-time `init` append only) |
+| R3 | No fake MCP tool results |
+| R4 | No request interception or mock SSE |
+| R5 | Private keys never in repository |
+
+DLP redaction applied before queue storage. SQL sandbox blocks all write operations. Thinking blocks excluded by default.
+
+## Requirements
+
+- Node.js >= 20.0.0
+- macOS or Linux
+- Claude Code CLI
+- OpenRouter API key (or local Ollama)
+
+## Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `better-sqlite3` | SQLite driver with WAL |
+| `sqlite-vec` | Vector search (vec0 virtual table) |
+| `@huggingface/transformers` | Local bge-m3 embedding |
+| `@modelcontextprotocol/sdk` | MCP server + stdio transport |
+| `eventsource-parser` | SSE stream parser |
+| `zod` | Config + schema validation |
+| `pino` | Structured JSON logging |
+| `nanoid` | Short ID generation |
+
+## Documentation
+
+- [Quickstart Guide](docs/quickstart.md) — Full installation and usage instructions
+- [Conversation Logging](docs/conversation-logging.md) — Real-time markdown logging + transcript converter
+- [PRD](docs/kiroku-v15-prd.md) — Product requirements document
+- [CHANGELOG](CHANGELOG.md) — Detailed change log
+- [ADR-001: CJK Text Search](docs/adr-001-cjk-text-search.md) — Chinese word segmentation strategy
+- [ADR-002: Tool Description vs CLAUDE.md](docs/adr-002-tool-description-vs-claude-md.md) — MCP tool trigger design
+- [ADR-003: License System](docs/adr-003-license-system-design.md) — Ed25519 + Lemon Squeezy integration
+- [ADR-004: Memory Scope System](docs/adr-004-memory-scope-system.md) — Cross-project global memory
+
+## License
+
+Dual tier: Free (500 facts, text search only) / Pro (unlimited, vector search, premium extraction prompt). Lemon Squeezy license validation with 7-day offline grace period.

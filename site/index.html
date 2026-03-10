@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kiroku — Persistent Memory for Claude Code</title>
+<meta name="description" content="Kiroku gives Claude Code a long-term memory. Every conversation is automatically extracted, embedded, and searchable via MCP — so your AI assistant truly knows your codebase.">
+<meta property="og:title" content="Kiroku — Persistent Memory for Claude Code">
+<meta property="og:description" content="Give Claude Code a long-term memory. Auto-extract knowledge, vector search via MCP.">
+<meta property="og:url" content="https://kiroku.orz99.com">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128214;</text></svg>">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0f;--surface:#12121a;--border:#1e1e2e;
+  --text:#e4e4ef;--muted:#8888a0;--accent:#a78bfa;--accent2:#818cf8;
+  --green:#34d399;--orange:#fb923c;
+  --font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --mono:'SF Mono',Menlo,Consolas,monospace;
+}
+html{scroll-behavior:smooth}
+body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* Layout */
+.container{max-width:1080px;margin:0 auto;padding:0 24px}
+
+/* Nav */
+nav{position:sticky;top:0;z-index:10;background:rgba(10,10,15,.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:16px 0}
+nav .container{display:flex;align-items:center;justify-content:space-between}
+.logo{font-size:1.25rem;font-weight:700;letter-spacing:-.02em}
+.logo span{color:var(--accent)}
+nav ul{display:flex;gap:28px;list-style:none}
+nav a{color:var(--muted);font-size:.9rem;transition:color .2s}
+nav a:hover{color:var(--text);text-decoration:none}
+.nav-cta{background:var(--accent);color:#000;padding:6px 16px;border-radius:6px;font-weight:600;font-size:.85rem}
+.nav-cta:hover{opacity:.9;text-decoration:none;color:#000}
+
+/* Hero */
+.hero{padding:100px 0 80px;text-align:center}
+.hero h1{font-size:clamp(2.5rem,5vw,3.75rem);font-weight:800;letter-spacing:-.03em;line-height:1.1;margin-bottom:20px}
+.hero h1 .accent{background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero p{font-size:1.2rem;color:var(--muted);max-width:640px;margin:0 auto 40px}
+.hero-actions{display:flex;gap:16px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:12px 28px;border-radius:8px;font-weight:600;font-size:1rem;transition:all .2s}
+.btn-primary{background:var(--accent);color:#000}
+.btn-primary:hover{opacity:.9;text-decoration:none;color:#000}
+.btn-secondary{border:1px solid var(--border);color:var(--text);background:transparent}
+.btn-secondary:hover{border-color:var(--muted);text-decoration:none}
+.hero-terminal{margin:60px auto 0;max-width:680px;background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;text-align:left}
+.terminal-bar{display:flex;gap:8px;padding:12px 16px;background:rgba(255,255,255,.03);border-bottom:1px solid var(--border)}
+.terminal-dot{width:12px;height:12px;border-radius:50%;background:#333}
+.terminal-dot:nth-child(1){background:#ff5f57}
+.terminal-dot:nth-child(2){background:#febc2e}
+.terminal-dot:nth-child(3){background:#28c840}
+.terminal-body{padding:20px 24px;font-family:var(--mono);font-size:.875rem;line-height:1.8}
+.terminal-body .prompt{color:var(--green)}
+.terminal-body .cmd{color:var(--text)}
+.terminal-body .output{color:var(--muted)}
+.terminal-body .highlight{color:var(--accent)}
+
+/* How It Works */
+.section{padding:80px 0}
+.section-title{font-size:2rem;font-weight:700;letter-spacing:-.02em;text-align:center;margin-bottom:12px}
+.section-sub{color:var(--muted);text-align:center;max-width:560px;margin:0 auto 56px}
+
+.flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:32px}
+.flow-step{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px 24px;position:relative}
+.flow-step::before{content:attr(data-step);position:absolute;top:-14px;left:20px;background:var(--accent);color:#000;font-weight:700;font-size:.8rem;padding:2px 10px;border-radius:20px}
+.flow-step h3{margin:8px 0 8px;font-size:1.05rem}
+.flow-step p{color:var(--muted);font-size:.9rem}
+
+/* Features */
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:24px}
+.feature{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px}
+.feature-icon{font-size:1.5rem;margin-bottom:12px}
+.feature h3{font-size:1.05rem;margin-bottom:8px}
+.feature p{color:var(--muted);font-size:.9rem}
+
+/* Pricing */
+.pricing{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:28px;max-width:800px;margin:0 auto}
+.plan{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:36px 32px;position:relative}
+.plan.featured{border-color:var(--accent)}
+.plan.featured::before{content:'POPULAR';position:absolute;top:-12px;right:20px;background:var(--accent);color:#000;font-weight:700;font-size:.7rem;padding:3px 12px;border-radius:20px;letter-spacing:.05em}
+.plan-name{font-size:1.1rem;font-weight:600;margin-bottom:4px}
+.plan-price{font-size:2.5rem;font-weight:800;letter-spacing:-.03em;margin:8px 0}
+.plan-price span{font-size:1rem;font-weight:400;color:var(--muted)}
+.plan-desc{color:var(--muted);font-size:.9rem;margin-bottom:24px}
+.plan ul{list-style:none;margin-bottom:28px}
+.plan li{padding:6px 0;font-size:.9rem;color:var(--muted)}
+.plan li::before{content:'';display:inline-block;width:16px;height:16px;margin-right:10px;vertical-align:middle;background:var(--green);mask:url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M13.5 4.5L6.5 11.5L2.5 7.5' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat}
+.plan li.disabled::before{background:var(--muted);mask:url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M4 12L12 4M4 4l8 8' stroke='%23fff' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat}
+.plan-btn{display:block;text-align:center;padding:12px;border-radius:8px;font-weight:600;font-size:.95rem;transition:all .2s}
+.plan-btn-free{border:1px solid var(--border);color:var(--text)}
+.plan-btn-free:hover{border-color:var(--muted);text-decoration:none}
+.plan-btn-pro{background:var(--accent);color:#000}
+.plan-btn-pro:hover{opacity:.9;text-decoration:none;color:#000}
+
+/* Architecture */
+.arch-diagram{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:32px;font-family:var(--mono);font-size:.85rem;line-height:1.7;color:var(--muted);max-width:700px;margin:0 auto;white-space:pre;overflow-x:auto}
+.arch-diagram .hl{color:var(--accent)}
+.arch-diagram .gr{color:var(--green)}
+.arch-diagram .or{color:var(--orange)}
+
+/* FAQ */
+.faq{max-width:700px;margin:0 auto}
+.faq details{border-bottom:1px solid var(--border);padding:20px 0}
+.faq summary{cursor:pointer;font-weight:600;font-size:1rem;list-style:none}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary::before{content:'+';display:inline-block;width:24px;color:var(--accent);font-weight:400;font-size:1.2rem}
+.faq details[open] summary::before{content:'-'}
+.faq details p{margin-top:12px;color:var(--muted);font-size:.9rem;padding-left:24px}
+
+/* CTA */
+.cta-section{text-align:center;padding:100px 0 120px}
+.cta-section h2{font-size:2rem;font-weight:700;margin-bottom:12px}
+.cta-section p{color:var(--muted);margin-bottom:32px}
+
+/* Footer */
+footer{border-top:1px solid var(--border);padding:32px 0;text-align:center;color:var(--muted);font-size:.85rem}
+footer a{color:var(--muted)}
+footer a:hover{color:var(--text)}
+
+@media(max-width:640px){
+  .hero{padding:60px 0 40px}
+  .flow{grid-template-columns:1fr}
+  .features{grid-template-columns:1fr}
+  .pricing{grid-template-columns:1fr}
+  nav ul{gap:16px}
+}
+</style>
+</head>
+<body>
+
+<nav>
+<div class="container">
+  <div class="logo"><span>kiroku</span></div>
+  <ul>
+    <li><a href="#how">How It Works</a></li>
+    <li><a href="#features">Features</a></li>
+    <li><a href="#pricing">Pricing</a></li>
+    <li><a href="#faq">FAQ</a></li>
+    <li><a href="https://github.com/yelban/kiroku" target="_blank">GitHub</a></li>
+    <li><a href="#pricing" class="nav-cta">Get Started</a></li>
+  </ul>
+</div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+<div class="container">
+  <h1>Persistent Memory for<br><span class="accent">Claude Code</span></h1>
+  <p>Kiroku automatically extracts knowledge from every Claude conversation, embeds it in a local vector database, and makes it searchable via MCP. Your AI assistant finally remembers.</p>
+  <div class="hero-actions">
+    <a href="#pricing" class="btn btn-primary">Start Free</a>
+    <a href="https://github.com/yelban/kiroku" class="btn btn-secondary" target="_blank">View on GitHub</a>
+  </div>
+
+  <div class="hero-terminal">
+    <div class="terminal-bar"><div class="terminal-dot"></div><div class="terminal-dot"></div><div class="terminal-dot"></div></div>
+    <div class="terminal-body">
+      <span class="prompt">$</span> <span class="cmd">npx kiroku init</span><br>
+      <span class="output">  Created ~/.kiroku/ directory structure</span><br>
+      <span class="output">  Database: ~/.kiroku/data/memory.sqlite</span><br><br>
+      <span class="prompt">$</span> <span class="cmd">npx kiroku start</span><br>
+      <span class="output">  Proxy started (port 7778)</span><br>
+      <span class="output">  Worker started (PID 42891)</span><br>
+      <span class="output">  MCP config: .mcp.json</span><br><br>
+      <span class="output">Launching Claude Code...</span><br><br>
+      <span class="prompt">claude&gt;</span> <span class="cmd">what did we decide about the auth system?</span><br>
+      <span class="highlight">Found 3 relevant memories:</span><br>
+      <span class="output">  1. Decided to use JWT with refresh tokens (0.95)</span><br>
+      <span class="output">  2. Auth module uses bcrypt for password hashing (0.88)</span><br>
+      <span class="output">  3. Session timeout set to 24 hours (0.82)</span>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- How It Works -->
+<section class="section" id="how">
+<div class="container">
+  <h2 class="section-title">How It Works</h2>
+  <p class="section-sub">Three invisible layers that give Claude Code a memory, without changing your workflow.</p>
+
+  <div class="flow">
+    <div class="flow-step" data-step="1">
+      <h3>Transparent Proxy</h3>
+      <p>Routes Claude API traffic through a local proxy that side-records every conversation turn to a JSONL queue. Zero latency impact.</p>
+    </div>
+    <div class="flow-step" data-step="2">
+      <h3>Knowledge Extraction</h3>
+      <p>A background worker processes each turn with an LLM to extract structured entities, facts, and relationships. Fully async.</p>
+    </div>
+    <div class="flow-step" data-step="3">
+      <h3>Vector Search via MCP</h3>
+      <p>Facts are embedded with bge-m3 and stored in SQLite + sqlite-vec. Claude queries them automatically through MCP tools.</p>
+    </div>
+    <div class="flow-step" data-step="4">
+      <h3>Heat &amp; Decay</h3>
+      <p>A half-life system keeps frequently-accessed memories warm and lets stale knowledge fade. Your memory stays relevant.</p>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- Architecture -->
+<section class="section">
+<div class="container">
+  <h2 class="section-title">Architecture</h2>
+  <p class="section-sub">Three independent modules. All data stays local.</p>
+  <div class="arch-diagram">
+<span class="hl">Claude Code</span>
+    |
+    |  ANTHROPIC_BASE_URL=http://127.0.0.1:7778
+    v
+<span class="or">[Aegis Proxy]</span> ──&gt; api.anthropic.com
+    |
+    |  SSE side-record &gt; .jsonl queue
+    v
+<span class="or">[Memory Worker]</span> ──&gt; LLM extraction (OpenRouter/Ollama)
+    |                ──&gt; bge-m3 embedding
+    v
+<span class="gr">[SQLite + sqlite-vec]</span>  (~/.kiroku/data/memory.sqlite)
+    ^
+    |  MCP stdio
+    |
+<span class="hl">[MCP Gateway]</span> ──&gt; memory_search, memory_save, sql_readonly
+    ^
+    |
+<span class="hl">Claude Code</span> (automatic tool calls)</div>
+</div>
+</section>
+
+<!-- Features -->
+<section class="section" id="features">
+<div class="container">
+  <h2 class="section-title">Features</h2>
+  <p class="section-sub">Everything you need for AI-native project memory.</p>
+
+  <div class="features">
+    <div class="feature">
+      <div class="feature-icon">&#x1f50d;</div>
+      <h3>Semantic Search</h3>
+      <p>Vector similarity + keyword matching. Claude finds relevant memories automatically through MCP, no manual tagging needed.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">&#x1f512;</div>
+      <h3>DLP Redaction</h3>
+      <p>AWS keys, API tokens, GitHub PATs — all automatically detected and redacted before storage. Your secrets stay secret.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">&#x1f4c8;</div>
+      <h3>Cross-Project Memory</h3>
+      <p>Personal preferences and global knowledge persist across all projects. Claude remembers "always use bun" everywhere.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">&#x1f525;</div>
+      <h3>Heat &amp; Decay</h3>
+      <p>Half-life decay keeps memories fresh. Frequently accessed facts stay hot, unused ones cool down naturally.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">&#x1f4be;</div>
+      <h3>100% Local</h3>
+      <p>All data stored in a local SQLite database. No cloud sync, no third-party storage. Your knowledge, your machine.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">&#x1f6e0;</div>
+      <h3>SQL Sandbox</h3>
+      <p>Claude can run read-only SQL queries against your memory database for complex analysis, timeline queries, and cross-project stats.</p>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- Pricing -->
+<section class="section" id="pricing">
+<div class="container">
+  <h2 class="section-title">Pricing</h2>
+  <p class="section-sub">Start free. Upgrade when your memory grows.</p>
+
+  <div class="pricing">
+    <div class="plan">
+      <div class="plan-name">Free</div>
+      <div class="plan-price">$0 <span>/ forever</span></div>
+      <div class="plan-desc">Perfect for trying out AI memory</div>
+      <ul>
+        <li>500 facts stored</li>
+        <li>50 daily extractions</li>
+        <li>Basic extraction prompt</li>
+        <li>Full MCP integration</li>
+        <li>DLP redaction</li>
+        <li class="disabled">Vector search (embedding)</li>
+        <li class="disabled">Premium extraction prompt</li>
+        <li class="disabled">Priority support</li>
+      </ul>
+      <a href="https://github.com/yelban/kiroku" class="plan-btn plan-btn-free">Install Free</a>
+    </div>
+
+    <div class="plan featured">
+      <div class="plan-name">Pro</div>
+      <div class="plan-price">$9 <span>/ month</span></div>
+      <div class="plan-desc">For developers who ship daily</div>
+      <ul>
+        <li>Unlimited facts</li>
+        <li>Unlimited extractions</li>
+        <li>Premium extraction prompt</li>
+        <li>Full MCP integration</li>
+        <li>DLP redaction</li>
+        <li>Vector search (bge-m3)</li>
+        <li>Auto-updated prompts</li>
+        <li>Priority support</li>
+      </ul>
+      <a href="#" class="plan-btn plan-btn-pro" id="buy-pro">Get Pro</a>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- FAQ -->
+<section class="section" id="faq">
+<div class="container">
+  <h2 class="section-title">FAQ</h2>
+  <div class="faq">
+    <details>
+      <summary>Does Kiroku send my code to external servers?</summary>
+      <p>No. The proxy records conversation turns locally. Extraction uses your own LLM API key (OpenRouter, Ollama, etc.). All extracted knowledge stays in your local SQLite database. The only network call Kiroku makes is the extraction LLM request.</p>
+    </details>
+    <details>
+      <summary>What LLMs are supported for extraction?</summary>
+      <p>Any OpenRouter model (Gemini Flash, Claude Haiku, Llama, etc.) or local Ollama models. The default is Gemini 2.0 Flash via OpenRouter — fast, cheap, and high quality.</p>
+    </details>
+    <details>
+      <summary>Does it work with Claude Pro / Max subscriptions?</summary>
+      <p>Yes. Kiroku transparently proxies to Anthropic's API. It works with any Claude plan that supports the API, including Pro and Max.</p>
+    </details>
+    <details>
+      <summary>What's the difference between Free and Pro?</summary>
+      <p>Free tier limits you to 500 stored facts, 50 daily extractions, and uses a basic extraction prompt without vector search. Pro removes all limits, enables vector similarity search with bge-m3 embeddings, and gives you the premium extraction prompt with higher accuracy.</p>
+    </details>
+    <details>
+      <summary>Can I self-host everything?</summary>
+      <p>Yes. Kiroku is designed to be fully self-hostable. Free tier works completely offline. Pro features require a license key for the premium extraction prompt, but all data processing happens locally.</p>
+    </details>
+    <details>
+      <summary>How do I activate a Pro license?</summary>
+      <p>After purchase, run <code>kiroku activate &lt;your-license-key&gt;</code>. The key is tied to your machine ID. You can deactivate and transfer to another machine anytime with <code>kiroku deactivate</code>.</p>
+    </details>
+  </div>
+</div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section">
+<div class="container">
+  <h2>Give Claude Code a memory.</h2>
+  <p>Install in 30 seconds. No sign-up required for the free tier.</p>
+  <div class="hero-actions">
+    <a href="https://github.com/yelban/kiroku" class="btn btn-primary">Get Started</a>
+  </div>
+</div>
+</section>
+
+<footer>
+<div class="container">
+  <p>Kiroku &copy; 2026 <a href="https://github.com/yelban">yelban</a>. Built for developers who build with AI.</p>
+</div>
+</footer>
+
+</body>
+</html>

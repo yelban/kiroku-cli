@@ -1,0 +1,29 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+# env / secrets
+.env
+.env.*
+.mcp.json
+*.pem
+*.key
+keys/
+
+# runtime
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# subdirs
+server/.wrangler/
+site/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

@@ -25,6 +25,12 @@ const USE_DIST = HAS_DIST && !HAS_SRC;
 // Set KIROKU_ROOT so bundled code can find migrations/
 process.env.KIROKU_ROOT = ROOT;
 
+// Read version from package.json
+const PKG_VERSION = (() => {
+  try { return JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version; }
+  catch { return '0.0.0'; }
+})();
+
 // Lazy imports to avoid loading heavy modules for simple commands
 async function paths() { return await import('../src/shared/paths.js'); }
 async function config() { return await import('../src/shared/config.js'); }
@@ -54,6 +60,9 @@ if (handler) {
     console.error(`Error: ${err.message}`);
     process.exit(1);
   });
+} else if (cmd === '--version' || cmd === '-V') {
+  console.log(PKG_VERSION);
+  process.exit(0);
 } else if (!cmd || (cmd.startsWith('-') && cmd !== '--help' && cmd !== '-h')) {
   // No subcommand or flag → default to start, pass everything to claude
   if (cmd) args = process.argv.slice(2);
@@ -75,7 +84,7 @@ async function cmdInit() {
   const { ensureDirs, CONFIG_PATH, DB_PATH } = await paths();
   const { saveDefaultConfig, loadConfig } = await config();
 
-  console.log('Initializing Kiroku V15...');
+  console.log(`Initializing Kiroku v${PKG_VERSION}...`);
 
   // Create directories
   ensureDirs();
@@ -140,7 +149,7 @@ async function cmdStart() {
     }
   }
 
-  console.log('Starting Kiroku V15...');
+  console.log(`Starting Kiroku v${PKG_VERSION}...`);
 
   // Check for existing proxy
   const existingProxy = await getProxyState(p);
@@ -393,7 +402,7 @@ async function cmdDoctor() {
     }
   }
 
-  console.log('Kiroku V15 Health Check\n');
+  console.log(`Kiroku v${PKG_VERSION} Health Check\n`);
 
   // Config check (not part of shared health)
   let cfg;
@@ -837,7 +846,7 @@ async function cmdHookOnStop() {
 }
 
 function cmdHelp() {
-  console.log(`Kiroku V15 - Enterprise AI Memory Gateway
+  console.log(`Kiroku v${PKG_VERSION} - AI Memory Gateway
 
 Usage: kiroku <command> [options]
 

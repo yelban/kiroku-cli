@@ -121,6 +121,20 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
     const subjectEntityId = entityMap.get(fact.subject) || null;
     const scope = fact.scope || (fact.fact_type === 'preference' ? 'global' : 'project');
 
+    // Content-level dedup: skip if identical predicate+object+scope already exists
+    const dupSql = scope === 'global'
+      ? `SELECT id FROM facts WHERE predicate = ? AND object_text = ? AND scope = 'global' AND status = 'active' LIMIT 1`
+      : `SELECT id FROM facts WHERE predicate = ? AND object_text = ? AND scope = ? AND status = 'active' AND project_id = ? LIMIT 1`;
+    const dupParams = scope === 'global'
+      ? [fact.predicate, fact.object]
+      : [fact.predicate, fact.object, scope, projectId];
+    const dup = d.prepare(dupSql).get(...dupParams);
+    if (dup) {
+      d.prepare(`UPDATE facts SET heat = MAX(heat, 0.7), updated_at = ? WHERE id = ?`).run(now, dup.id);
+      log.debug({ dupId: dup.id, predicate: fact.predicate }, 'content dedup: boosted existing fact');
+      continue;
+    }
+
     // Check for existing active fact with same subject+predicate+scope → supersede
     if (subjectEntityId) {
       const existing = d.prepare(
@@ -231,6 +245,19 @@ export function saveFactManually({ subject, predicate, object, detail, factType,
     const normalized = normalizeName(subject);
     d.prepare('INSERT INTO entities (id, canonical_name, entity_type, aliases_json, normalized_name, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(subjectEntityId, subject, 'concept', '[]', normalized, now, now);
+  }
+
+  // Content-level dedup: return existing fact if identical predicate+object+scope
+  const dupSql = resolvedScope === 'global'
+    ? `SELECT id FROM facts WHERE predicate = ? AND object_text = ? AND scope = 'global' AND status = 'active' LIMIT 1`
+    : `SELECT id FROM facts WHERE predicate = ? AND object_text = ? AND scope = ? AND status = 'active' AND project_id = ? LIMIT 1`;
+  const dupParams = resolvedScope === 'global'
+    ? [predicate, object]
+    : [predicate, object, resolvedScope, projectId];
+  const dup = d.prepare(dupSql).get(...dupParams);
+  if (dup) {
+    d.prepare(`UPDATE facts SET heat = MAX(heat, 0.7), updated_at = ? WHERE id = ?`).run(now, dup.id);
+    return dup.id;
   }
 
   // Supersede existing (same scope only)

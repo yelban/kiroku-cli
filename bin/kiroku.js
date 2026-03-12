@@ -200,35 +200,64 @@ async function cmdStart() {
   }
   console.log(`  MCP config: ${mcpJsonPath}`);
 
-  // Write Stop hook to settings.local.json
+  // Write hooks to settings.local.json
   const settingsDir = join(process.cwd(), '.claude');
   const settingsPath = join(settingsDir, 'settings.local.json');
   // Use dist/cli.cjs (npm install) or bin/kiroku.js (dev) for the hook command
   const hookBin = USE_DIST
     ? join(ROOT, 'dist', 'cli.cjs')
     : join(ROOT, 'bin', 'kiroku.js');
-  const hookCommand = `node ${hookBin} hook-on-stop`;
+  const stopHookCmd = `node ${hookBin} hook-on-stop`;
+
+  // Create UserPromptSubmit hook script (~5ms bash, no Node overhead)
+  const promptHookDir = join(homedir(), '.kiroku', 'hooks');
+  const promptHookPath = join(promptHookDir, 'on-prompt.sh');
   try {
-    const { mkdirSync: mkdirSyncFs } = await import('node:fs');
+    const { mkdirSync: mkdirSyncFs, chmodSync: chmodSyncFs } = await import('node:fs');
+    mkdirSyncFs(promptHookDir, { recursive: true });
+    writeFileSync(promptHookPath, [
+      '#!/bin/bash',
+      '# Kiroku: inject project_context on first message of each session',
+      '[ -f "$HOME/.kiroku/data/memory.sqlite" ] || exit 0',
+      'INPUT=$(cat)',
+      'SID=$(echo "$INPUT" | grep -o \'"session_id":"[^"]*"\' | head -1 | cut -d\'"\' -f4)',
+      '[ -z "$SID" ] && exit 0',
+      'MARKER="/tmp/.kiroku-ctx-$SID"',
+      '[ -f "$MARKER" ] && exit 0',
+      'touch "$MARKER"',
+      'echo \'{"additionalContext":"Call the project_context tool to load project memory before responding to the user."}\'',
+      '',
+    ].join('\n'));
+    chmodSyncFs(promptHookPath, 0o755);
+
     mkdirSyncFs(settingsDir, { recursive: true });
     let settings = {};
     if (existsSync(settingsPath)) {
       try { settings = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch {}
     }
     if (!settings.hooks) settings.hooks = {};
+
+    // Stop hook: remove stale, register current
     if (!settings.hooks.Stop) settings.hooks.Stop = [];
-    // Check if hook already registered
-    const hasHook = settings.hooks.Stop.some(
-      h => h.hooks?.some(hh => hh.command === hookCommand)
+    settings.hooks.Stop = settings.hooks.Stop.filter(
+      h => !h.hooks?.some(hh => /\bhook-on-stop\b/.test(hh.command))
     );
-    if (!hasHook) {
-      settings.hooks.Stop.push({
-        matcher: '',
-        hooks: [{ type: 'command', command: hookCommand }],
-      });
-      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-      console.log(`  Stop hook: ${settingsPath}`);
-    }
+    settings.hooks.Stop.push({
+      matcher: '',
+      hooks: [{ type: 'command', command: stopHookCmd }],
+    });
+
+    // UserPromptSubmit hook: remove stale, register current
+    if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
+    settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
+      h => !h.hooks?.some(hh => /kiroku|on-prompt/.test(hh.command))
+    );
+    settings.hooks.UserPromptSubmit.push({
+      matcher: '',
+      hooks: [{ type: 'command', command: `bash ${promptHookPath}` }],
+    });
+
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
   } catch (err) {
     // Non-fatal: hook registration is best-effort
   }

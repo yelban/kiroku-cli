@@ -218,26 +218,42 @@ async function cmdStart() {
     : join(ROOT, 'bin', 'kiroku.js');
   const stopHookCmd = `node ${hookBin} hook-on-stop`;
 
-  // Create UserPromptSubmit hook script (~5ms bash, no Node overhead)
-  const promptHookDir = join(homedir(), '.kiroku', 'hooks');
-  const promptHookPath = join(promptHookDir, 'on-prompt.sh');
+  // Create SessionStart hook script (bash + sqlite3, no Node overhead)
+  // Fires on: startup, resume, clear, compact — re-injects after context compaction
+  const hookDir = join(homedir(), '.kiroku', 'hooks');
+  const sessionHookPath = join(hookDir, 'on-session-start.sh');
   try {
     const { mkdirSync: mkdirSyncFs, chmodSync: chmodSyncFs } = await import('node:fs');
-    mkdirSyncFs(promptHookDir, { recursive: true });
-    writeFileSync(promptHookPath, [
-      '#!/bin/bash',
-      '# Kiroku: inject project_context on first message of each session',
-      '[ -f "$HOME/.kiroku/data/memory.sqlite" ] || exit 0',
-      'INPUT=$(cat)',
-      'SID=$(echo "$INPUT" | grep -o \'"session_id":"[^"]*"\' | head -1 | cut -d\'"\' -f4)',
-      '[ -z "$SID" ] && exit 0',
-      'MARKER="/tmp/.kiroku-ctx-$SID"',
-      '[ -f "$MARKER" ] && exit 0',
-      'touch "$MARKER"',
-      'echo \'{"additionalContext":"Call the project_context tool to load project memory before responding to the user."}\'',
-      '',
-    ].join('\n'));
-    chmodSyncFs(promptHookPath, 0o755);
+    mkdirSyncFs(hookDir, { recursive: true });
+    // Write bash script directly — avoids JS string escaping hell
+    const scriptSql = `SELECT '[' || f.fact_type || '] ' || COALESCE(e.canonical_name, '?') || ' '
+    || f.predicate || ' ' || f.object_text
+    || CASE WHEN f.object_detail IS NOT NULL AND f.object_detail <> '' THEN ' -- ' || f.object_detail ELSE '' END
+    || CASE WHEN f.scope = 'global' THEN ' [global]' ELSE '' END
+  FROM facts f LEFT JOIN entities e ON f.subject_entity_id = e.id
+  WHERE f.status = 'active'
+    AND ((f.project_id = '\$PROJECT_ID' AND f.scope = 'project') OR f.scope = 'global')
+  ORDER BY CASE f.fact_type
+      WHEN 'preference' THEN 0 WHEN 'semantic' THEN 1 WHEN 'task' THEN 2
+      WHEN 'state' THEN 3 WHEN 'episodic' THEN 4 ELSE 5 END,
+    f.heat * (1.0 + MIN(f.access_count, 20) * 0.1) DESC
+  LIMIT 30`;
+    writeFileSync(sessionHookPath,
+`#!/bin/bash
+# Kiroku: inject project memory at session start
+# Fires on: startup, resume, clear, compact
+DB="\$HOME/.kiroku/data/memory.sqlite"
+[ -f "\$DB" ] || exit 0
+command -v sqlite3 >/dev/null || exit 0
+INPUT=\$(cat)
+CWD=\$(echo "\$INPUT" | grep -o '"cwd":"[^"]*"' | head -1 | cut -d'"' -f4)
+[ -z "\$CWD" ] && exit 0
+PROJECT_ID=\$(echo "\$CWD" | tr '/' '-' | sed "s/^-//; s/'/''/g")
+FACTS=\$(sqlite3 "\$DB" "${scriptSql}" 2>/dev/null)
+[ -z "\$FACTS" ] && exit 0
+printf '# Project Memory (auto-loaded)\\n\\n%s\\n' "\$FACTS"
+`);
+    chmodSyncFs(sessionHookPath, 0o755);
 
     mkdirSyncFs(settingsDir, { recursive: true });
     let settings = {};
@@ -256,15 +272,23 @@ async function cmdStart() {
       hooks: [{ type: 'command', command: stopHookCmd }],
     });
 
-    // UserPromptSubmit hook: remove stale, register current
-    if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
-    settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
-      h => !h.hooks?.some(hh => /kiroku|on-prompt/.test(hh.command))
+    // SessionStart hook: remove stale, register current
+    if (!settings.hooks.SessionStart) settings.hooks.SessionStart = [];
+    settings.hooks.SessionStart = settings.hooks.SessionStart.filter(
+      h => !h.hooks?.some(hh => /kiroku|on-session-start/.test(hh.command))
     );
-    settings.hooks.UserPromptSubmit.push({
+    settings.hooks.SessionStart.push({
       matcher: '',
-      hooks: [{ type: 'command', command: `bash ${promptHookPath}` }],
+      hooks: [{ type: 'command', command: `bash ${sessionHookPath}` }],
     });
+
+    // Clean up old UserPromptSubmit hooks (replaced by SessionStart)
+    if (settings.hooks.UserPromptSubmit) {
+      settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
+        h => !h.hooks?.some(hh => /kiroku|on-prompt/.test(hh.command))
+      );
+      if (settings.hooks.UserPromptSubmit.length === 0) delete settings.hooks.UserPromptSubmit;
+    }
 
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
   } catch (err) {

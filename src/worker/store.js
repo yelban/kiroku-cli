@@ -110,7 +110,7 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
   if (!d) throw new Error('DB not set');
 
   const now = new Date().toISOString();
-  const factIds = [];
+  const results = []; // aligned with input facts; null = deduped/skipped
 
   // Freemium eviction: enforce fact limit
   if (licenseState && !licenseState.licensed) {
@@ -132,6 +132,7 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
     if (dup) {
       d.prepare(`UPDATE facts SET heat = MAX(heat, 0.7), updated_at = ? WHERE id = ?`).run(now, dup.id);
       log.debug({ dupId: dup.id, predicate: fact.predicate }, 'content dedup: boosted existing fact');
+      results.push(null);
       continue;
     }
 
@@ -153,10 +154,10 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
         0.7, now, 0);
 
     writeAudit(d, { projectId, action: 'extract', targetType: 'fact', targetId: fid, detail: { subject: fact.subject, predicate: fact.predicate } });
-    factIds.push(fid);
+    results.push(fid);
   }
 
-  return factIds;
+  return results;
 }
 
 export function storeEmbeddings(factIds, embeddings, projectId, facts) {
@@ -399,6 +400,92 @@ export function runDecaySweep(config) {
 
   const result = tx();
   log.info({ ...result, frozenProjects: frozenProjects.size }, 'decay sweep complete');
+}
+
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+  return dot; // vectors are normalized, so dot product = cosine
+}
+
+export function runCompactionSweep(db) {
+  if (!isVecEnabled()) return { merged: 0, conflicts: 0 };
+
+  const now = new Date().toISOString();
+  let merged = 0;
+  let conflicts = 0;
+
+  // Group by subject_entity_id with >1 active fact
+  const groups = db.prepare(`
+    SELECT subject_entity_id, COUNT(*) as cnt
+    FROM facts
+    WHERE status = 'active' AND subject_entity_id IS NOT NULL
+    GROUP BY subject_entity_id
+    HAVING cnt > 1
+  `).all();
+
+  for (const { subject_entity_id } of groups) {
+    const facts = db.prepare(`
+      SELECT f.id, f.predicate, f.object_text, f.heat, f.base_heat, f.created_at
+      FROM facts f
+      WHERE f.subject_entity_id = ? AND f.status = 'active'
+      ORDER BY f.heat DESC
+    `).all(subject_entity_id);
+
+    // Load embeddings for this group
+    const embMap = new Map();
+    for (const f of facts) {
+      try {
+        const row = db.prepare(
+          'SELECT embedding FROM fact_embeddings WHERE fact_id = ? AND status = ?'
+        ).get(f.id, 'active');
+        if (row) embMap.set(f.id, new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4));
+      } catch { /* embedding may not exist */ }
+    }
+
+    // Greedy merge: anchor = highest heat, cosine > 0.92 = merge
+    const archived = new Set();
+    for (let i = 0; i < facts.length; i++) {
+      if (archived.has(facts[i].id)) continue;
+      const embA = embMap.get(facts[i].id);
+      if (!embA) continue;
+
+      for (let j = i + 1; j < facts.length; j++) {
+        if (archived.has(facts[j].id)) continue;
+        const embB = embMap.get(facts[j].id);
+        if (!embB) continue;
+
+        const cosine = cosineSimilarity(embA, embB);
+
+        if (cosine > 0.92) {
+          // Archive lower-heat fact, boost survivor
+          db.prepare(`UPDATE facts SET status = 'compacted', updated_at = ? WHERE id = ?`)
+            .run(now, facts[j].id);
+          db.prepare(`UPDATE fact_embeddings SET status = 'compacted' WHERE fact_id = ?`)
+            .run(facts[j].id);
+          db.prepare(`UPDATE facts SET heat = MAX(heat, ?), base_heat = MAX(base_heat, ?), updated_at = ? WHERE id = ?`)
+            .run(facts[j].heat, facts[j].base_heat, now, facts[i].id);
+          archived.add(facts[j].id);
+          merged++;
+        } else if (cosine > 0.75) {
+          // Phase 3: Conflict detection — related but not duplicate
+          if (facts[i].predicate === facts[j].predicate &&
+              facts[i].object_text !== facts[j].object_text) {
+            log.warn({
+              factA: facts[i].id, factB: facts[j].id,
+              predicate: facts[i].predicate,
+              objectA: facts[i].object_text, objectB: facts[j].object_text,
+              cosine: cosine.toFixed(3),
+            }, 'potential fact conflict detected');
+            conflicts++;
+          }
+        }
+      }
+    }
+  }
+
+  log.info({ merged, conflicts }, 'compaction sweep complete');
+  return { merged, conflicts };
 }
 
 export function boostFactHeat(factIds, boost = 0.05) {

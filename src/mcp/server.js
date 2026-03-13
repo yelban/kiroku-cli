@@ -131,7 +131,7 @@ By default searches both project-scoped and global (cross-project) facts.`,
       {},
       async () => {
         try {
-          const brief = getProjectBrief(getDb(), projectId, config.mcp.projectBrief.maxFacts);
+          const brief = getProjectBrief(getDb(), projectId, config.mcp.projectBrief);
           return { content: [{ type: 'text', text: brief }] };
         } catch (err) {
           log.error({ err: err.message }, 'project_context error');
@@ -174,7 +174,7 @@ By default searches both project-scoped and global (cross-project) facts.`,
       'kiroku://context/project-brief',
       { mimeType: 'text/plain', description: 'Auto-injected project context from memory' },
       async () => {
-        const brief = getProjectBrief(getDb(), projectId, config.mcp.projectBrief.maxFacts);
+        const brief = getProjectBrief(getDb(), projectId, config.mcp.projectBrief);
         return { contents: [{ uri: 'kiroku://context/project-brief', text: brief, mimeType: 'text/plain' }] };
       }
     );

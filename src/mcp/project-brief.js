@@ -1,5 +1,50 @@
-export function getProjectBrief(db, projectId, maxFacts) {
-  const rows = db.prepare(`
+function tokenize(text) {
+  return new Set(text.toLowerCase().split(/\s+/).filter(w => w.length > 1));
+}
+
+function jaccardSimilarity(a, b) {
+  let intersection = 0;
+  for (const x of a) { if (b.has(x)) intersection++; }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function isDiverse(candidate, selected) {
+  const candSubject = (candidate.subject || '').toLowerCase();
+  for (const s of selected) {
+    if ((s.subject || '').toLowerCase() !== candSubject) continue; // different subject = always diverse
+    const candWords = tokenize(candidate.predicate + ' ' + candidate.object_text);
+    const selWords = tokenize(s.predicate + ' ' + s.object_text);
+    if (jaccardSimilarity(candWords, selWords) > 0.5) return false;
+  }
+  return true;
+}
+
+function estimateTokens(line) {
+  const cjk = (line.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []).length;
+  return Math.ceil(cjk * 1.5 + (line.length - cjk) / 4);
+}
+
+function formatLine(r) {
+  const detail = r.object_detail ? ` — ${r.object_detail}` : '';
+  const scope = r.scope === 'global' ? ' [global]' : '';
+  return `[${r.fact_type}] ${r.subject || '?'} ${r.predicate} ${r.object_text}${detail}${scope}`;
+}
+
+export function getProjectBrief(db, projectId, config) {
+  // Accept both old (maxFacts number) and new (config object) signatures
+  let maxFacts, maxTokens;
+  if (typeof config === 'number') {
+    maxFacts = config;
+    maxTokens = 0;
+  } else {
+    maxFacts = config?.maxFacts || 50;
+    maxTokens = config?.maxTokens || 0;
+  }
+
+  // Fetch 3× candidates for diversity filtering
+  const fetchLimit = maxFacts * 3;
+  const candidates = db.prepare(`
     SELECT f.fact_type, f.predicate, f.object_text, f.heat, f.scope,
            f.object_detail, e.canonical_name as subject
     FROM facts f
@@ -17,15 +62,32 @@ export function getProjectBrief(db, projectId, maxFacts) {
       END,
       f.heat * (1.0 + MIN(f.access_count, 20) * 0.1) DESC
     LIMIT ?
-  `).all(projectId, maxFacts);
+  `).all(projectId, fetchLimit);
 
-  if (!rows.length) return 'No project context available yet.';
+  if (!candidates.length) return 'No project context available yet.';
 
-  const lines = rows.map(r => {
-    const detail = r.object_detail ? ` — ${r.object_detail}` : '';
-    const scope = r.scope === 'global' ? ' [global]' : '';
-    return `[${r.fact_type}] ${r.subject || '?'} ${r.predicate} ${r.object_text}${detail}${scope}`;
-  });
+  const selected = [];
+  let tokenCount = 0;
 
-  return `# Project Memory Brief (${rows.length} facts)\n\n${lines.join('\n')}`;
+  for (const r of candidates) {
+    if (!isDiverse(r, selected)) continue;
+
+    const line = formatLine(r);
+    const lineTokens = estimateTokens(line);
+
+    if (maxTokens > 0 && tokenCount + lineTokens > maxTokens) break;
+
+    selected.push(r);
+    tokenCount += lineTokens;
+
+    if (selected.length >= maxFacts) break;
+  }
+
+  if (!selected.length) return 'No project context available yet.';
+
+  const lines = selected.map(formatLine);
+  return `# Project Memory Brief (${selected.length} facts)\n\n${lines.join('\n')}`;
 }
+
+// Exported for reuse in memory-search.js
+export { isDiverse, tokenize, jaccardSimilarity, estimateTokens };

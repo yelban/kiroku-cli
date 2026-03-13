@@ -1,6 +1,7 @@
 import { getDb, isVecEnabled } from '../shared/db.js';
 import { createLogger } from '../shared/logger.js';
 import { boostFactHeat, setDb as storeSetDb } from '../worker/store.js';
+import { isDiverse } from './project-brief.js';
 
 const log = createLogger('memory-search');
 
@@ -77,11 +78,13 @@ async function vectorSearch(db, params) {
     }
   }
   rows.sort((a, b) => a.distance - b.distance);
-  rows = rows.slice(0, limit);
+  rows = rows.slice(0, limit * 3); // over-fetch for diversity filtering
 
   if (fact_types?.length) rows = rows.filter(r => fact_types.includes(r.fact_type));
   if (time_from) rows = rows.filter(r => r.created_at >= time_from);
   if (time_to) rows = rows.filter(r => r.created_at <= time_to);
+
+  rows = diversityFilter(rows, limit);
 
   if (rows.length > 0) {
     try {
@@ -133,9 +136,10 @@ function textSearch(db, params) {
   if (time_from) { sql += ` AND f.created_at >= ?`; p.push(time_from); }
   if (time_to) { sql += ` AND f.created_at <= ?`; p.push(time_to); }
   sql += ` ORDER BY f.heat DESC, f.created_at DESC LIMIT ?`;
-  p.push(limit);
+  p.push(limit * 3); // over-fetch for diversity filtering
 
-  const results = db.prepare(sql).all(...p);
+  let results = db.prepare(sql).all(...p);
+  results = diversityFilter(results, limit);
   if (results.length > 0) {
     try {
       ensureStoreDb();
@@ -144,6 +148,16 @@ function textSearch(db, params) {
   }
 
   return formatResults(results);
+}
+
+function diversityFilter(rows, limit) {
+  const selected = [];
+  for (const r of rows) {
+    if (!isDiverse(r, selected)) continue;
+    selected.push(r);
+    if (selected.length >= limit) break;
+  }
+  return selected;
 }
 
 function formatResults(rows) {

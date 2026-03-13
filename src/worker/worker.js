@@ -9,7 +9,7 @@ import { jobId } from '../shared/ids.js';
 import { extract, setPromptProvider } from './extractor.js';
 import { embedTexts, initEmbedder } from './embedder.js';
 import { initPromptLoader, getPrompt, stopPromptLoader } from './prompt-loader.js';
-import { setDb, storeTurn, storeEntities, storeFacts, storeEmbeddings, createExtractionJob, updateExtractionJob, runDecaySweep } from './store.js';
+import { setDb, storeTurn, storeEntities, storeFacts, storeEmbeddings, createExtractionJob, updateExtractionJob, runDecaySweep, runCompactionSweep } from './store.js';
 import { getLicenseState } from '../license/license-state.js';
 
 const log = createLogger('worker');
@@ -60,11 +60,13 @@ export async function startWorker() {
     startedAt: new Date().toISOString(),
   }));
 
-  // Run initial decay sweep
+  // Run initial decay + compaction sweep
   if (config.worker.decay.enabled) {
     try { runDecaySweep(config); } catch (err) { log.warn({ err: err.message }, 'initial decay sweep failed'); }
+    try { runCompactionSweep(db); } catch (err) { log.warn({ err: err.message }, 'initial compaction sweep failed'); }
     decayTimer = setInterval(() => {
       try { runDecaySweep(config); } catch (err) { log.warn({ err: err.message }, 'decay sweep failed'); }
+      try { runCompactionSweep(db); } catch (err) { log.warn({ err: err.message }, 'compaction sweep failed'); }
     }, config.worker.decay.sweepIntervalMs);
   }
 
@@ -164,13 +166,22 @@ async function processFile(filename, config) {
 
     // 3. Store entities and facts
     const entityMap = storeEntities(extraction.entities, event.project_id);
-    const factIds = storeFacts(extraction.facts, entityMap, event.project_id, turnData.assistantTurnId, _licenseState);
+    const factResults = storeFacts(extraction.facts, entityMap, event.project_id, turnData.assistantTurnId, _licenseState);
 
-    // 4. Generate embeddings for facts (skip if free tier)
-    if (factIds.length > 0 && (!_licenseState || _licenseState.embeddingEnabled)) {
-      const factTexts = extraction.facts.map(f => `${f.subject} ${f.predicate} ${f.object}`);
+    // 4. Generate embeddings only for actually inserted facts (filter out deduped nulls)
+    const inserted = factResults
+      .map((fid, i) => fid ? { fid, fact: extraction.facts[i] } : null)
+      .filter(Boolean);
+
+    if (inserted.length > 0 && (!_licenseState || _licenseState.embeddingEnabled)) {
+      const factTexts = inserted.map(p => `${p.fact.subject} ${p.fact.predicate} ${p.fact.object}`);
       const embeddings = await embedTexts(factTexts);
-      storeEmbeddings(factIds, embeddings, event.project_id, extraction.facts);
+      storeEmbeddings(
+        inserted.map(p => p.fid),
+        embeddings,
+        event.project_id,
+        inserted.map(p => p.fact),
+      );
     }
 
     updateExtractionJob(jid, {
@@ -181,7 +192,7 @@ async function processFile(filename, config) {
     });
 
     renameSync(processingPath, donePath);
-    log.info({ jid, eventId: event.event_id, entities: extraction.entities.length, facts: extraction.facts.length }, 'processed');
+    log.info({ jid, eventId: event.event_id, entities: extraction.entities.length, facts: extraction.facts.length, inserted: inserted.length }, 'processed');
 
   } catch (err) {
     const retry = _retryAttempts.get(filename) || { count: 0 };

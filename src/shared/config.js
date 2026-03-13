@@ -99,6 +99,7 @@ const ConfigSchema = z.object({
     projectBrief: z.object({
       enabled: z.boolean().default(true),
       maxFacts: z.number().default(50),
+      maxTokens: z.number().default(4000), // 0 = unlimited
     }).default({}),
   }).default({}),
   license: z.object({

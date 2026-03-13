@@ -3,6 +3,25 @@
 All notable changes to Kiroku are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.0] - 2026-03-14
+
+### Added
+
+#### Memory Intelligence — Semantic Dedup, Retrieval Diversity & Conflict Detection
+- **Retrieval diversity filter**: `project_context` and `memory_search` now apply word-level Jaccard similarity (threshold 0.5) to filter near-duplicate facts with the same subject, reducing context token waste
+- **Token budget**: `mcp.projectBrief.maxTokens` config (default 4000, 0 = unlimited) caps `project_context` output size via token estimation (CJK-aware)
+- **Compaction sweep**: New `runCompactionSweep()` runs alongside decay sweep (every 6h), merging semantically near-identical facts (cosine > 0.92) within the same subject entity — lower-heat fact is archived as `compacted`, survivor gets heat boost
+- **Conflict detection**: During compaction sweep, facts with cosine 0.75–0.92, same predicate but different object are logged as potential conflicts
+
+### Fixed
+- **Embedding misalignment bug**: `storeFacts()` now returns an aligned array (same length as input) with `null` for deduped facts; `processFile()` filters nulls before embedding, fixing factId↔embedding index mismatch introduced by content-level dedup in v1.2.7
+
+### Changed
+- **`storeFacts()` return type**: `string[]` → `(string|null)[]` — callers must filter nulls for actual inserted fact IDs
+- **Over-fetch for diversity**: `project_context` fetches 3× candidates before filtering; `memory_search` similarly over-fetches for diversity filtering
+
+---
+
 ## [15.1.0] - 2026-03-07
 
 ### Added

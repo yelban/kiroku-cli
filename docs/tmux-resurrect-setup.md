@@ -97,6 +97,59 @@ tmux source ~/.tmux.conf
   → 每個 kiroku 視窗自動恢復運作
 ```
 
+## tmux + iTerm2 最佳化（Claude Code 場景）
+
+Claude Code 在 tmux 裡會有三個常見問題：畫面閃爍、滑鼠複製失敗、滾動卡頓。
+以下是針對 iTerm2 + tmux 環境的完整設定。
+
+### 問題與對策
+
+| 問題 | 原因 | 修法 |
+|------|------|------|
+| 畫面閃爍 | `set-titles on` 在高頻輸出時不斷送 escape sequence 更新 title bar | `set-titles off` |
+| 滑鼠選取複製不到、反白不消失 | tmux 攔截滑鼠進入 copy-mode，但沒接到系統剪貼簿 | `copy-pipe-and-cancel "pbcopy"` |
+| 滾動卡頓 | tmux 預設每個 wheel tick 跳 5 行 | 改成 2 行 + iTerm2 關閉 arrow key 模式 |
+
+### 完整 tmux.conf 設定
+
+```tmux
+# --- 防閃爍 ---
+set -g allow-passthrough on        # 讓 DEC 2026 synchronized output 穿透
+set -g set-titles off              # 關掉！高頻輸出時 title escape 會造成閃爍
+set -g default-terminal "tmux-256color"
+set -ga terminal-overrides ",xterm-256color:RGB"
+set -g status-interval 30          # status bar 更新頻率降低（預設 15）
+set -g history-limit 250000        # Claude Code 高吞吐量需要更大 scrollback
+
+# --- 剪貼簿 + 滑鼠複製 ---
+set -g mouse on
+set -g set-clipboard on
+set -as terminal-features ',xterm-256color:clipboard'
+setw -g mode-keys vi
+
+# 滑鼠拖選放開 → 自動複製到系統剪貼簿 + 清除反白 + 退出 copy-mode
+bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "pbcopy"
+bind-key -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "pbcopy"
+bind-key -T copy-mode-vi Enter send-keys -X copy-pipe-and-cancel "pbcopy"
+
+# --- 滾動優化 ---
+bind-key -T copy-mode-vi WheelUpPane send-keys -X -N 2 scroll-up
+bind-key -T copy-mode-vi WheelDownPane send-keys -X -N 2 scroll-down
+```
+
+### iTerm2 設定（GUI）
+
+| 位置 | 設定 | 值 |
+|------|------|----|
+| General > Selection | Applications in terminal may access clipboard | 勾選 |
+| General > Selection | Allow sending of clipboard contents | Ask Each Time |
+| Advanced > Mouse | Scroll wheel sends arrow keys when in alternate screen mode | **No** |
+
+> **提示：** 改完 tmux.conf 後需要 `tmux kill-server` 完全重啟，
+> 不能只用 `tmux source`，因為 `terminal-overrides` 等設定需要重新初始化。
+>
+> 臨時 workaround：按住 **Option** 鍵再拖選，iTerm2 會繞過 tmux 直接處理複製。
+
 ## Claude Code sandbox 設定
 
 搭配 `--dangerously-skip-permissions` 使用時，需要在 `~/.claude/settings.json` 的

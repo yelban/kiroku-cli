@@ -2,3 +2,21 @@
 # kiroku start 時寫 ~/.kiroku/run/sessions/<slug>.json (cwd + args)
 # resurrect 還原後自動在對應 pane 重跑 kiroku
 set -g @resurrect-hook-post-restore-all 'run-shell "~/.local/bin/kiroku-resurrect"'
+
+# ==================== Claude Code 最佳化 ====================
+# 防閃爍：關掉 set-titles（高頻輸出時 title escape 造成閃爍）
+set -g set-titles off
+set -g status-interval 30
+set -g history-limit 250000
+
+# 剪貼簿：滑鼠拖選 → 自動 pbcopy + 清反白
+set -g set-clipboard on
+set -as terminal-features ',xterm-256color:clipboard'
+setw -g mode-keys vi
+bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "pbcopy"
+bind-key -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "pbcopy"
+bind-key -T copy-mode-vi Enter send-keys -X copy-pipe-and-cancel "pbcopy"
+
+# 滾動：每次 2 行（預設 5 行太卡）
+bind-key -T copy-mode-vi WheelUpPane send-keys -X -N 2 scroll-up
+bind-key -T copy-mode-vi WheelDownPane send-keys -X -N 2 scroll-down

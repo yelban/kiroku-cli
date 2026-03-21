@@ -1,0 +1,4 @@
+# ==================== Kiroku 自動恢復 ====================
+# kiroku start 時寫 ~/.kiroku/run/sessions/<slug>.json (cwd + args)
+# resurrect 還原後自動在對應 pane 重跑 kiroku
+set -g @resurrect-hook-post-restore-all 'run-shell "~/.local/bin/kiroku-resurrect"'

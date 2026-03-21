@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# kiroku-resurrect — restore kiroku sessions after tmux-resurrect
+# Called via @resurrect-hook-post-restore-all
+#
+# Reads ~/.kiroku/run/sessions/*.json and re-runs kiroku
+# in the matching tmux pane (idle shell with same cwd).
+
+SESSIONS_DIR="$HOME/.kiroku/run/sessions"
+[ -d "$SESSIONS_DIR" ] || exit 0
+
+for f in "$SESSIONS_DIR"/*.json; do
+  [ -f "$f" ] || continue
+
+  CWD=$(sed -n 's/.*"cwd": "\(.*\)".*/\1/p' "$f")
+  CMD=$(sed -n 's/.*"command": "\(.*\)".*/\1/p' "$f")
+  [ -z "$CWD" ] || [ -z "$CMD" ] && continue
+
+  # Find an idle shell pane whose current path matches
+  PANE=$(tmux list-panes -a -F '#{pane_id} #{pane_current_path} #{pane_current_command}' | \
+    awk -v p="$CWD" '$2==p && ($3=="zsh" || $3=="bash" || $3=="fish"){print $1; exit}')
+  [ -z "$PANE" ] && continue
+
+  tmux send-keys -t "$PANE" "$CMD" Enter
+  sleep 0.5
+done

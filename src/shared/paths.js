@@ -28,6 +28,7 @@ export const LOG_DIR = join(KIROKU_HOME, 'logs');
 export const CONVERSATIONS_LOG_DIR = join(LOG_DIR, 'conversations');
 export const TRANSCRIPTS_DIR = join(LOG_DIR, 'transcripts');
 export const RUN_DIR = join(KIROKU_HOME, 'run');
+export const SESSIONS_DIR = join(RUN_DIR, 'sessions');
 export const PROXY_STATE_PATH = join(RUN_DIR, 'proxy.state.json');
 export const WORKER_STATE_PATH = join(RUN_DIR, 'worker.state.json');
 export const BACKUP_DIR = join(KIROKU_HOME, 'backups');
@@ -44,7 +45,7 @@ export function ensureDirs() {
     QUEUE_INCOMING, QUEUE_PROCESSING, QUEUE_DONE, QUEUE_DEAD,
     EXPORTS_DIR, CACHE_DIR, MODEL_CACHE_DIR, PROMPT_CACHE_DIR,
     LOG_DIR, CONVERSATIONS_LOG_DIR, TRANSCRIPTS_DIR,
-    RUN_DIR, BACKUP_DIR,
+    RUN_DIR, SESSIONS_DIR, BACKUP_DIR,
   ];
   for (const dir of dirs) {
     mkdirSync(dir, { recursive: true });

@@ -2,7 +2,7 @@
 
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, chmodSync, mkdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -151,21 +151,59 @@ async function cmdStart() {
 
   console.log(`Starting Kiroku v${PKG_VERSION}...`);
 
-  // Check for existing proxy
+  // Check/start proxy with lock to prevent concurrent startups
+  const proxyLockPath = join(p.RUN_DIR, 'proxy.lock');
   const existingProxy = await getProxyState(p);
   if (existingProxy) {
     console.log(`Proxy already running on port ${existingProxy.port}`);
+  } else if (acquireStartupLock(proxyLockPath)) {
+    try {
+      // Re-check after acquiring lock (another process may have started it)
+      const recheck = await getProxyState(p);
+      if (recheck) {
+        console.log(`Proxy already running on port ${recheck.port}`);
+      } else {
+        await startProxyDaemon(p);
+      }
+    } finally {
+      try { unlinkSync(proxyLockPath); } catch {}
+    }
   } else {
-    // Start proxy daemon
-    await startProxyDaemon(p);
+    // Another process holds the lock — wait for proxy to become ready
+    console.log('Waiting for proxy (another instance starting)...');
+    const ready = await waitForProxyState(p, 20);
+    if (ready) {
+      console.log(`Proxy ready (port ${ready.port})`);
+    } else {
+      console.error('Timed out waiting for proxy');
+      process.exit(1);
+    }
   }
 
-  // Start worker daemon
+  // Check/start worker with same lock pattern
+  const workerLockPath = join(p.RUN_DIR, 'worker.lock');
   const existingWorker = getWorkerState(p);
   if (existingWorker) {
     console.log(`Worker already running (PID ${existingWorker.pid})`);
   } else if (cfg.worker.enabled) {
-    await startWorkerDaemon(p);
+    if (acquireStartupLock(workerLockPath)) {
+      try {
+        const recheckW = getWorkerState(p);
+        if (recheckW) {
+          console.log(`Worker already running (PID ${recheckW.pid})`);
+        } else {
+          await startWorkerDaemon(p);
+        }
+      } finally {
+        try { unlinkSync(workerLockPath); } catch {}
+      }
+    } else {
+      console.log('Waiting for worker (another instance starting)...');
+      for (let i = 0; i < 20; i++) {
+        await sleep(500);
+        if (getWorkerState(p)) break;
+      }
+    }
   }
 
   // Read proxy state for Claude launch
@@ -295,6 +333,19 @@ printf '# Project Memory (auto-loaded)\\n\\n%s\\n' "\$FACTS"
     // Non-fatal: hook registration is best-effort
   }
 
+  // Write session state for tmux-resurrect
+  const sessionSlug = projectSlug;
+  const sessionDir = join(p.RUN_DIR, 'sessions');
+  mkdirSync(sessionDir, { recursive: true });
+  const sessionPath = join(sessionDir, `${sessionSlug}.json`);
+  const originalArgs = process.argv.slice(2);
+  writeFileSync(sessionPath, JSON.stringify({
+    cwd: process.cwd(),
+    argv: originalArgs,
+    command: `kiroku ${originalArgs.join(' ')}`.trim(),
+    startedAt: new Date().toISOString(),
+  }, null, 2) + '\n');
+
   // Set up environment and launch Claude
   const env = { ...process.env };
   const baseUrl = `http://127.0.0.1:${proxyState.port}/project/${encodeURIComponent(projectSlug)}`;
@@ -319,6 +370,7 @@ printf '# Project Memory (auto-loaded)\\n\\n%s\\n' "\$FACTS"
 
   child.on('exit', (code) => {
     clearInterval(heartbeatTimer);
+    try { unlinkSync(sessionPath); } catch {}
     process.exit(code || 0);
   });
 
@@ -359,6 +411,11 @@ async function cmdStop() {
   } else {
     console.log('No worker running');
   }
+
+  // Clean session state
+  const slug = process.cwd().replace(/[\\/]/g, '-').replace(/^-/, '');
+  const sessFile = join(p.RUN_DIR, 'sessions', `${slug}.json`);
+  try { unlinkSync(sessFile); } catch {}
 }
 
 async function cmdStatus() {
@@ -986,6 +1043,34 @@ function getWorkerState(p) {
 
 function isProcessAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+// Atomic lock via O_EXCL — returns true if acquired, false if held by another live process
+function acquireStartupLock(lockPath) {
+  try {
+    writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+    return true;
+  } catch {
+    // Lock file exists — check if holder is still alive (stale lock cleanup)
+    try {
+      const holderPid = parseInt(readFileSync(lockPath, 'utf8'));
+      if (!isProcessAlive(holderPid)) {
+        try { unlinkSync(lockPath); } catch {}
+        writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+        return true;
+      }
+    } catch {}
+    return false;
+  }
+}
+
+async function waitForProxyState(p, maxRetries = 20) {
+  for (let i = 0; i < maxRetries; i++) {
+    await sleep(500);
+    const state = await getProxyState(p);
+    if (state) return state;
+  }
+  return null;
 }
 
 function httpGet(url) {

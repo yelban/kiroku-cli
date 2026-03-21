@@ -97,6 +97,56 @@ tmux source ~/.tmux.conf
   → 每個 kiroku 視窗自動恢復運作
 ```
 
+## Claude Code sandbox 設定
+
+搭配 `--dangerously-skip-permissions` 使用時，需要在 `~/.claude/settings.json` 的
+sandbox allowWrite 加入 `~/.kiroku`，否則 kiroku 寫入 session state、log 等會被 sandbox 阻擋。
+
+> **注意：`~/.claude/settings.json` 必須是嚴格 JSON 格式，不支援 `//` 或 `/* */` 註解。**
+> 加了註解會導致解析失敗、設定不生效。
+
+建議的 sandbox filesystem 設定：
+
+```json
+{
+  "sandbox": {
+    "filesystem": {
+      "allowWrite": [
+        "//tmp",
+        "//private/tmp",
+        "~/.kiroku",
+        "~/.local",
+        "~/.claude",
+        "~/.cache",
+        "~/.config",
+        "~/.npm"
+      ]
+    }
+  }
+}
+```
+
+各路徑用途：
+
+| 路徑 | 用途 |
+|------|------|
+| `~/.kiroku` | session state、proxy state、logs、DB、queue |
+| `~/.local` | `~/.local/bin/kiroku-resurrect` 腳本 |
+| `~/.claude` | 計畫檔、memory、debug log（settings.json 受 denyWithinAllow 硬保護） |
+| `~/.cache` | uv、bun、deno 等工具快取 |
+| `~/.config` | gh、git 等工具設定 |
+| `~/.npm` | npm cache、publish 時需要 |
+
+### denyWithinAllow（Claude Code 內建，無法關閉）
+
+即使 `~/.claude` 在 allowWrite 中，以下路徑仍被 Claude Code 硬編碼保護：
+
+- `~/.claude/settings.json`
+- `.claude/settings.json`（專案層級）
+- `.claude/settings.local.json`
+- `.claude/skills/`
+- `~/.bashrc`、`~/.zshrc`
+
 ## 檔案清單
 
 | 檔案 | 用途 |

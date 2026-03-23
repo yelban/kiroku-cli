@@ -678,10 +678,11 @@ async function cmdReindex() {
 
 async function cmdTranscript() {
   const p = await paths();
-  const { listSessions, convertTranscript } = await import('../src/cli/transcript-converter.js');
+  const { listSessions, listAllProjects, convertTranscript } = await import('../src/cli/transcript-converter.js');
 
   // Parse flags
   const isList = args.includes('--list');
+  const isListAll = args.includes('--list-all');
   const isAll = args.includes('--all');
   const includeThinking = args.includes('--thinking');
   const noRedact = args.includes('--no-redact');
@@ -702,6 +703,29 @@ async function cmdTranscript() {
       console.log(`  ${s.sessionId}  ${date} ${time}  (${s.lineCount} entries)`);
     }
     console.log(`\nUsage: kiroku transcript <session-id>`);
+    return;
+  }
+
+  if (isListAll) {
+    const projects = listAllProjects();
+    if (projects.length === 0) {
+      console.log('No sessions found in any project.');
+      return;
+    }
+    // Non-TTY (piped): static output
+    if (!process.stdin.isTTY) {
+      for (const proj of projects) {
+        console.log(`\n${proj.path} (${proj.sessions.length} sessions)`);
+        for (const s of proj.sessions) {
+          const date = s.firstTimestamp ? s.firstTimestamp.slice(0, 10) : '?';
+          const time = s.firstTimestamp ? s.firstTimestamp.slice(11, 16) : '';
+          console.log(`  ${s.sessionId}  ${date} ${time}  (${s.lineCount} entries)`);
+        }
+      }
+      return;
+    }
+    // TTY: interactive browser
+    await browseProjects(projects);
     return;
   }
 
@@ -726,7 +750,8 @@ async function cmdTranscript() {
 
   if (positional.length === 0) {
     console.error('Usage: kiroku transcript <session-id-or-path> [--thinking] [--no-redact] [--output <path>]');
-    console.error('       kiroku transcript --list');
+    console.error('       kiroku transcript --list          (current project)');
+    console.error('       kiroku transcript --list-all      (all projects)');
     console.error('       kiroku transcript --all [--thinking]');
     process.exit(1);
   }
@@ -946,7 +971,8 @@ Commands:
   hook-on-stop  (Internal) Trigger worker immediate poll via SIGUSR1
 
 Transcript options:
-  kiroku transcript --list                List available sessions
+  kiroku transcript --list                List available sessions (current project)
+  kiroku transcript --list-all            List sessions across all projects
   kiroku transcript <id>                  Convert session to markdown
   kiroku transcript <id> --thinking       Include thinking blocks
   kiroku transcript <id> --no-redact      Skip DLP redaction
@@ -1017,6 +1043,116 @@ async function startWorkerDaemon(p) {
     }
   }
   console.log('  Worker start timed out (will retry on next start)');
+}
+
+async function browseProjects(projects) {
+  const { emitKeypressEvents } = await import('node:readline');
+  emitKeypressEvents(process.stdin);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+
+  let mode = 'projects'; // 'projects' | 'sessions'
+  let cursor = 0;
+  let sessionCursor = 0;
+  let currentProject = null;
+
+  const rows = () => process.stdout.rows || 24;
+  const cols = () => process.stdout.columns || 80;
+
+  function render() {
+    process.stdout.write('\x1b[2J\x1b[H'); // clear screen
+
+    if (mode === 'projects') {
+      const header = ' Projects  (↑↓ navigate · Enter expand · q quit)';
+      console.log(`\x1b[7m${header.padEnd(cols())}\x1b[0m\n`);
+      const maxVisible = rows() - 4;
+      const start = Math.max(0, cursor - maxVisible + 2);
+      const end = Math.min(projects.length, start + maxVisible);
+      for (let i = start; i < end; i++) {
+        const p = projects[i];
+        const latest = p.sessions[0]?.lastTimestamp?.slice(0, 10) || '?';
+        const line = `  ${p.path}  (${p.sessions.length} sessions, latest: ${latest})`;
+        if (i === cursor) {
+          console.log(`\x1b[36m❯ ${line}\x1b[0m`);
+        } else {
+          console.log(`  ${line}`);
+        }
+      }
+    } else {
+      const proj = currentProject;
+      const header = ` ${proj.path}  (← back · ↑↓ navigate · q quit)`;
+      console.log(`\x1b[7m${header.padEnd(cols())}\x1b[0m\n`);
+      const maxVisible = rows() - 4;
+      const start = Math.max(0, sessionCursor - maxVisible + 2);
+      const end = Math.min(proj.sessions.length, start + maxVisible);
+      for (let i = start; i < end; i++) {
+        const s = proj.sessions[i];
+        const date = s.firstTimestamp ? s.firstTimestamp.slice(0, 10) : '?';
+        const time = s.firstTimestamp ? s.firstTimestamp.slice(11, 16) : '';
+        const line = `  ${s.sessionId}  ${date} ${time}  (${s.lineCount} entries)`;
+        if (i === sessionCursor) {
+          console.log(`\x1b[33m❯ ${line}\x1b[0m`);
+        } else {
+          console.log(`  ${line}`);
+        }
+      }
+    }
+  }
+
+  function cleanup() {
+    process.stdin.setRawMode(false);
+    process.stdin.pause();
+    process.stdout.write('\x1b[2J\x1b[H');
+  }
+
+  return new Promise((resolve) => {
+    render();
+
+    process.stdin.on('keypress', (str, key) => {
+      if (!key) return;
+
+      // Quit
+      if (key.name === 'q' || key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+        cleanup();
+        resolve();
+        return;
+      }
+
+      if (mode === 'projects') {
+        if (key.name === 'up' || key.name === 'k') {
+          cursor = Math.max(0, cursor - 1);
+        } else if (key.name === 'down' || key.name === 'j') {
+          cursor = Math.min(projects.length - 1, cursor + 1);
+        } else if (key.name === 'return' || key.name === 'right' || key.name === 'l') {
+          currentProject = projects[cursor];
+          sessionCursor = 0;
+          mode = 'sessions';
+        }
+      } else {
+        if (key.name === 'up' || key.name === 'k') {
+          sessionCursor = Math.max(0, sessionCursor - 1);
+        } else if (key.name === 'down' || key.name === 'j') {
+          sessionCursor = Math.min(currentProject.sessions.length - 1, sessionCursor + 1);
+        } else if (key.name === 'left' || key.name === 'h' || key.name === 'backspace') {
+          mode = 'projects';
+        } else if (key.name === 'return') {
+          // Copy session ID to stdout for easy use
+          cleanup();
+          const s = currentProject.sessions[sessionCursor];
+          console.log(`Session: ${s.sessionId}`);
+          console.log(`  Path: ${s.filePath}`);
+          const date = s.firstTimestamp ? s.firstTimestamp.slice(0, 10) : '?';
+          const time = s.firstTimestamp ? s.firstTimestamp.slice(11, 16) : '';
+          console.log(`  Date: ${date} ${time}`);
+          console.log(`  Entries: ${s.lineCount}`);
+          console.log(`\nConvert: kiroku transcript ${s.filePath}`);
+          resolve();
+          return;
+        }
+      }
+      render();
+    });
+  });
 }
 
 async function getProxyState(p) {

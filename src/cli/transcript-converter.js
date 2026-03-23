@@ -208,6 +208,31 @@ function extractUserContent(content) {
   return { text: textParts.join('\n'), toolResultBlocks };
 }
 
+/**
+ * List all projects that have session transcripts.
+ */
+export function listAllProjects() {
+  if (!existsSync(CLAUDE_PROJECTS_DIR)) return [];
+  const dirs = readdirSync(CLAUDE_PROJECTS_DIR);
+  const results = [];
+  for (const dir of dirs) {
+    const projectDir = join(CLAUDE_PROJECTS_DIR, dir);
+    if (!statSync(projectDir).isDirectory()) continue;
+    const sessions = listSessions(projectDir);
+    if (sessions.length === 0) continue;
+    // Decode slug back to path: -Users-foo-bar → /Users/foo/bar
+    const decoded = dir.replace(/^-/, '/').replace(/-/g, '/');
+    results.push({ slug: dir, path: decoded, sessions });
+  }
+  // Sort by most recent session across all projects
+  results.sort((a, b) => {
+    const aTs = a.sessions[0]?.lastTimestamp || '';
+    const bTs = b.sessions[0]?.lastTimestamp || '';
+    return bTs.localeCompare(aTs);
+  });
+  return results;
+}
+
 function resolveProjectDir() {
   // Claude Code encodes CWD as: /Users/foo/bar → -Users-foo-bar
   const cwd = process.cwd();

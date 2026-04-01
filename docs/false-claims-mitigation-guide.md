@@ -136,6 +136,48 @@ Claude Code 最常見的四種虛報行為：
 
 三者組合：強制驗證 → 如實回報 → 編輯前確認。覆蓋了虛報的主要場景。
 
+### 完整 CLAUDE.md 範本（複製貼上即用）
+
+三件套整合在一起，放到 `~/.claude/CLAUDE.md` 或專案根目錄的 `CLAUDE.md`。
+
+**English version:**
+
+```markdown
+## Code Quality
+
+- Read files before editing them.
+- Report outcomes faithfully: if tests fail, say so with the relevant output;
+  if you did not run a verification step, say that rather than implying it succeeded.
+  Never claim "all tests pass" when output shows failures,
+  never suppress or simplify failing checks (tests, lints, type errors)
+  to manufacture a green result,
+  and never characterize incomplete or broken work as done.
+  Equally, when a check did pass or a task is complete, state it plainly —
+  do not hedge confirmed results with unnecessary disclaimers,
+  downgrade finished work to "partial,"
+  or re-verify things you already checked.
+  The goal is an accurate report, not a defensive one.
+- After editing code, run the project's type-checker or linter
+  (e.g. `npx tsc --noEmit`, `npx eslint . --quiet`) to confirm no errors
+  before reporting the task as complete.
+```
+
+**繁體中文版：**
+
+```markdown
+## 程式碼品質
+
+- 編輯檔案前必須先 Read
+- 如實回報結果：測試失敗就說失敗並附輸出；未執行驗證就說未執行，不要暗示成功。
+  絕不在輸出顯示失敗時宣稱「所有測試通過」，絕不壓縮或簡化失敗的檢查來製造全綠結果，
+  絕不把未完成或有問題的工作描述為已完成。同樣地，當檢查確實通過或任務確實完成時，
+  直接陳述——不要用不必要的免責聲明對沖已確認的結果，不要把已完成的工作降級為「部分完成」，
+  也不要重新驗證已經檢查過的項目
+- 編輯程式碼後，執行專案的型別檢查或 linter
+  （如 `npx tsc --noEmit`、`npx eslint . --quiet`）確認無錯誤，
+  才能回報任務完成
+```
+
 ---
 
 ## 這不是什麼

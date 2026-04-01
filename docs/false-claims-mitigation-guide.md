@@ -4,9 +4,9 @@
 
 ## 3/31 發生了什麼事？
 
-2026 年 3 月 31 日，Claude Code 的完整原始碼被洩漏到網路上。這是 Anthropic 的旗艦 AI 開發工具——每天有數十萬開發者在用——第一次被攤在陽光下。
+2026 年 3 月 31 日，Claude Code 的完整原始碼洩漏了。每天有數十萬開發者在用的 Anthropic 旗艦 AI 開發工具，內部實作第一次攤在陽光下。
 
-原始碼揭露了不少內部機制：記憶系統怎麼運作（autoDream「做夢」整理記憶）、context window 怎麼壓縮（167K tokens 觸發自動壓縮）、子 Agent 怎麼並行——都蠻有趣的，但大多是已知行為的實作細節。
+原始碼揭露了不少東西。記憶系統怎麼運作（autoDream「做夢」整理記憶）、context window 怎麼壓縮（167K tokens 觸發）、子 Agent 怎麼並行。都蠻有趣，但大多是已知行為的實作細節。
 
 真正讓人意外的發現藏在 `src/constants/prompts.ts` 第 237 行：**Anthropic 知道模型會說謊，但只幫自己員工修了。**
 
@@ -56,7 +56,7 @@
   也不要重新驗證已經檢查過的項目
 ```
 
-這不是社群偏方。這是 Anthropic 內部 `prompts.ts` 第 237 行、用 `USER_TYPE === 'ant'` 限定只給員工載入的系統提示詞。原始碼洩漏後，你現在也能用了。
+這不是社群偏方。它來自 Anthropic 內部 `prompts.ts` 第 237 行，用 `USER_TYPE === 'ant'` 限定只給員工載入。原始碼洩漏後，你現在也能用了。
 
 放在 `~/.claude/CLAUDE.md` 全域生效，或放在專案根目錄的 `CLAUDE.md` 只對特定專案生效。
 

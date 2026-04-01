@@ -59,11 +59,17 @@ Claude Code 在開發過程中最常見的「說謊」行為：
 
 ## 怎麼用
 
-在 `~/.claude/CLAUDE.md`（全域設定，所有專案生效）的回應偏好段落加入：
+在 `~/.claude/CLAUDE.md`（全域設定，所有專案生效）的回應偏好段落加入。
+
+### 英文原版（直接從原始碼擷取）
 
 ```markdown
-## 回應偏好
+- Report outcomes faithfully: if tests fail, say so with the relevant output; if you did not run a verification step, say that rather than implying it succeeded. Never claim "all tests pass" when output shows failures, never suppress or simplify failing checks (tests, lints, type errors) to manufacture a green result, and never characterize incomplete or broken work as done. Equally, when a check did pass or a task is complete, state it plainly — do not hedge confirmed results with unnecessary disclaimers, downgrade finished work to "partial," or re-verify things you already checked. The goal is an accurate report, not a defensive one.
+```
 
+### 繁體中文版
+
+```markdown
 - 如實回報結果：測試失敗就說失敗並附輸出；未執行驗證就說未執行，不要暗示成功。
   絕不在輸出顯示失敗時宣稱「所有測試通過」，絕不壓縮或簡化失敗的檢查來製造全綠結果，
   絕不把未完成或有問題的工作描述為已完成。同樣地，當檢查確實通過或任務確實完成時，
@@ -71,7 +77,7 @@ Claude Code 在開發過程中最常見的「說謊」行為：
   也不要重新驗證已經檢查過的項目
 ```
 
-或者只在特定專案使用，放在專案根目錄的 `CLAUDE.md`。
+放在 `~/.claude/CLAUDE.md` 全域生效，或放在專案根目錄的 `CLAUDE.md` 只對特定專案生效。
 
 ## 實際效果
 

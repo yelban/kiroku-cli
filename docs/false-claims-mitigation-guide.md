@@ -1,5 +1,7 @@
 # Claude Code 有 29% 的時候在騙你——Anthropic 員工才有的「防唬爛」提示詞，現在你也能用了
 
+![cover](https://expo.36.to/kiroku/false-claims-cover.webp)
+
 ## 3/31 發生了什麼事？
 
 2026 年 3 月 31 日，Claude Code 的完整原始碼被洩漏到網路上。這是 Anthropic 的旗艦 AI 編程工具——每天被數十萬開發者使用——的內部實作第一次攤在陽光下。

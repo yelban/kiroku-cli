@@ -528,13 +528,15 @@ Dashboard → Store → **Discounts** → **Create Discount**
 
 **方式 2：帶折扣的連結（推薦）**
 
-在 checkout URL 加上 `?discount=CODE`，用戶打開即自動套用：
+在 checkout URL 加上 `?checkout[discount_code]=CODE`（需 URL-encode 方括號），用戶打開即自動套用：
 
 ```
-https://kitoku.lemonsqueezy.com/buy/YOUR_VARIANT_ID?discount=KIROKU-FREE
+https://kiroku.lemonsqueezy.com/buy/YOUR_VARIANT_ID?checkout%5Bdiscount_code%5D=KIROKU-FREE
 ```
 
-取得 checkout URL：Dashboard → Products → Kiroku Pro → **Share** → 複製連結，再加上 `?discount=KIROKU-FREE`。
+> ⚠️ 舊文件曾寫的 `?discount=CODE` 已經**不被 LS 接受**（會回 404/422），必須改用 `checkout[discount_code]` 格式。2026-04-12 實測確認。
+
+取得 checkout URL：Dashboard → Products → Kiroku Pro → **Share** → 複製連結，再加上 `?checkout%5Bdiscount_code%5D=KIROKU-FREE`。
 
 ### 6.4 注意事項
 
@@ -558,7 +560,7 @@ Expiry date:       2026-06-30
 
 給用戶的連結：
 ```
-https://kitoku.lemonsqueezy.com/buy/xxxxx?discount=KIROKU-BETA
+https://kiroku.lemonsqueezy.com/buy/xxxxx?checkout%5Bdiscount_code%5D=KIROKU-BETA
 ```
 
 用戶點連結 → 看到 $0.00 → 填卡號 → 取得 license key → `kiroku activate <key>` → 立即使用 pro tier。

@@ -72,14 +72,36 @@ kiroku status              # Report component states, DB stats, queue counts
 kiroku doctor              # Health check: config, DB, sqlite-vec, model, API keys, license
 kiroku export              # Export memory data to markdown
 kiroku reindex             # Rebuild missing embeddings
-kiroku transcript --list   # List available Claude Code sessions
-kiroku transcript <id>     # Convert session to readable markdown
 kiroku activate <key>      # Activate a Kiroku Pro license
 kiroku deactivate          # Deactivate current license
 kiroku license             # Show license status
 ```
 
 All `claude` CLI flags pass through: `kiroku start -c`, `kiroku start --resume`, etc.
+
+### Transcript Viewer & Search
+
+```bash
+kiroku transcript --view [<id>]      # ANSI colorized terminal replay (piped to less)
+kiroku transcript --view              # Interactive browser → pick session → view
+kiroku transcript --search <query>   # Full-text search across all sessions
+kiroku transcript --search <q> --project <slug>  # Search within a project
+kiroku transcript --list             # List sessions (current project)
+kiroku transcript --list-all         # Browse all projects (interactive TUI)
+kiroku transcript <id>               # Convert session to markdown file
+```
+
+AskUserQuestion interactions are rendered with `●`/`○` markers showing which options the user selected.
+
+### Session Recording
+
+```bash
+kiroku rec                 # Launch Claude Code with terminal recording
+kiroku play <file>         # Replay a recording
+kiroku recs                # List all recordings
+```
+
+Auto-detects asciinema (if installed) for animated replay; falls back to macOS `script` (zero dependencies).
 
 ## MCP Tools
 

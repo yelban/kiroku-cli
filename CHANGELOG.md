@@ -3,6 +3,23 @@
 All notable changes to Kiroku are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.4.0] - 2026-04-22
+
+### Added
+
+#### Transcript Viewer & Search
+- **`kiroku transcript --view [id]`**: ANSI colorized terminal replay piped to `less -R`; AskUserQuestion rendered with `●`/`○` markers showing selected/unselected options and user notes
+- **`kiroku transcript --view`** (no id): interactive TUI browser to pick a session, then view it
+- **`kiroku transcript --search <query>`**: full-text search across all session JSONL files with highlighted matches and context; supports `--project <slug>` filter
+
+#### Session Recording
+- **`kiroku rec`**: launch Claude Code wrapped in terminal recording; auto-detects asciinema (animated replay) with fallback to macOS `script` (zero dependencies)
+- **`kiroku play <file>`**: replay a `.cast` or `.typescript` recording
+- **`kiroku recs`**: list all recordings in `~/.kiroku/recordings/`
+
+### Fixed
+- Lemon Squeezy discount URL format: `?discount=CODE` → `?checkout[discount_code]=CODE` (old format returns 404/422)
+
 ## [1.3.0] - 2026-03-14
 
 ### Added

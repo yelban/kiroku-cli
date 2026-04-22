@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import http from 'node:http';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, chmodSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, chmodSync, mkdirSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -50,6 +50,9 @@ const COMMANDS = {
   activate: cmdActivate,
   deactivate: cmdDeactivate,
   license: cmdLicense,
+  rec: cmdRec,
+  play: cmdPlay,
+  recs: cmdRecs,
   'hook-on-stop': cmdHookOnStop,
   help: cmdHelp,
 };
@@ -677,18 +680,52 @@ async function cmdReindex() {
 }
 
 async function cmdTranscript() {
-  const p = await paths();
   const { listSessions, listAllProjects, convertTranscript } = await import('../src/cli/transcript-converter.js');
 
   // Parse flags
   const isList = args.includes('--list');
   const isListAll = args.includes('--list-all');
   const isAll = args.includes('--all');
+  const isView = args.includes('--view');
+  const isSearch = args.includes('--search');
   const includeThinking = args.includes('--thinking');
   const noRedact = args.includes('--no-redact');
+  const noPager = args.includes('--no-pager');
   const outputIdx = args.indexOf('--output');
   const output = outputIdx !== -1 ? args[outputIdx + 1] : null;
-  const positional = args.filter(a => !a.startsWith('--') && (outputIdx === -1 || args.indexOf(a) !== outputIdx + 1));
+  const projectIdx = args.indexOf('--project');
+  const projectFilter = projectIdx !== -1 ? args[projectIdx + 1] : null;
+  const flagArgs = new Set(['--output', '--project']);
+  const positional = args.filter(a => !a.startsWith('--') && !flagArgs.has(args[args.indexOf(a) - 1]));
+
+  // --view: terminal colorized viewer
+  if (isView) {
+    const { viewTranscript } = await import('../src/cli/transcript-viewer.js');
+    const target = positional[0];
+    if (!target) {
+      // Interactive: browse and pick
+      const projects = listAllProjects();
+      if (projects.length === 0) { console.log('No sessions found.'); return; }
+      const picked = await browseProjectsWithAction(projects);
+      if (picked) await viewTranscript(picked, { thinking: includeThinking, noRedact, noPager });
+      return;
+    }
+    await viewTranscript(target, { thinking: includeThinking, noRedact, noPager });
+    return;
+  }
+
+  // --search: full-text search
+  if (isSearch) {
+    const { searchTranscripts } = await import('../src/cli/transcript-search.js');
+    const searchIdx = args.indexOf('--search');
+    const query = args[searchIdx + 1];
+    if (!query || query.startsWith('--')) {
+      console.error('Usage: kiroku transcript --search <query> [--project <slug>]');
+      process.exit(1);
+    }
+    searchTranscripts(query, { project: projectFilter });
+    return;
+  }
 
   if (isList) {
     const sessions = listSessions();
@@ -749,10 +786,12 @@ async function cmdTranscript() {
   }
 
   if (positional.length === 0) {
-    console.error('Usage: kiroku transcript <session-id-or-path> [--thinking] [--no-redact] [--output <path>]');
-    console.error('       kiroku transcript --list          (current project)');
-    console.error('       kiroku transcript --list-all      (all projects)');
-    console.error('       kiroku transcript --all [--thinking]');
+    console.error('Usage: kiroku transcript <session-id> [--thinking] [--no-redact] [--output <path>]');
+    console.error('       kiroku transcript --view [<id>]   View in terminal with colors');
+    console.error('       kiroku transcript --search <q>    Full-text search');
+    console.error('       kiroku transcript --list          List sessions (current project)');
+    console.error('       kiroku transcript --list-all      Browse all projects');
+    console.error('       kiroku transcript --all           Convert all to markdown');
     process.exit(1);
   }
 
@@ -964,21 +1003,29 @@ Commands:
   doctor        Health check
   export        Export memory to markdown
   reindex       Rebuild missing embeddings (after migration or vec rebuild)
-  transcript    Convert Claude Code session to readable markdown
+  transcript    View, search, or convert session transcripts
+  rec           Record a Claude session (script/asciinema)
+  play          Replay a recording
+  recs          List recordings
   activate      Activate a license key
   deactivate    Deactivate current license
   license       Show license status
   hook-on-stop  (Internal) Trigger worker immediate poll via SIGUSR1
 
 Transcript options:
-  kiroku transcript --list                List available sessions (current project)
-  kiroku transcript --list-all            List sessions across all projects
+  kiroku transcript --view [<id>]         View in terminal with ANSI colors
+  kiroku transcript --search <query>      Full-text search across all sessions
+  kiroku transcript --list                List sessions (current project)
+  kiroku transcript --list-all            Browse all projects (interactive)
   kiroku transcript <id>                  Convert session to markdown
   kiroku transcript <id> --thinking       Include thinking blocks
   kiroku transcript <id> --no-redact      Skip DLP redaction
-  kiroku transcript <id> --output <path>  Custom output path
   kiroku transcript --all                 Convert all sessions
-  kiroku transcript --all --thinking      Convert all with thinking blocks
+
+Recording options:
+  kiroku rec                              Record session (auto-detect backend)
+  kiroku play <file>                      Replay a recording
+  kiroku recs                             List all recordings
 
 Examples:
   kiroku init            # First-time setup
@@ -1353,6 +1400,214 @@ Kiroku uses an LLM to extract knowledge from conversations.
   writeFileSync(CONFIG_PATH, JSON.stringify(rawCfg, null, 2) + '\n');
   resetConfigCache();
   console.log(`  Updated config: provider=${provider}, model=${model}`);
+}
+
+async function browseProjectsWithAction(projects) {
+  const { emitKeypressEvents } = await import('node:readline');
+  emitKeypressEvents(process.stdin);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+
+  let mode = 'projects'; // 'projects' | 'sessions' | 'action'
+  let cursor = 0;
+  let sessionCursor = 0;
+  let currentProject = null;
+
+  const rows = () => process.stdout.rows || 24;
+  const cols = () => process.stdout.columns || 80;
+
+  function render() {
+    process.stdout.write('\x1b[2J\x1b[H');
+
+    if (mode === 'projects') {
+      const header = ' Projects  (↑↓ navigate · Enter expand · q quit)';
+      console.log(`\x1b[7m${header.padEnd(cols())}\x1b[0m\n`);
+      const maxVisible = rows() - 4;
+      const start = Math.max(0, cursor - maxVisible + 2);
+      const end = Math.min(projects.length, start + maxVisible);
+      for (let i = start; i < end; i++) {
+        const p = projects[i];
+        const latest = p.sessions[0]?.lastTimestamp?.slice(0, 10) || '?';
+        const line = `  ${p.path}  (${p.sessions.length} sessions, latest: ${latest})`;
+        console.log(i === cursor ? `\x1b[36m❯ ${line}\x1b[0m` : `  ${line}`);
+      }
+    } else if (mode === 'sessions') {
+      const proj = currentProject;
+      const header = ` ${proj.path}  (← back · Enter select · v view · q quit)`;
+      console.log(`\x1b[7m${header.padEnd(cols())}\x1b[0m\n`);
+      const maxVisible = rows() - 4;
+      const start = Math.max(0, sessionCursor - maxVisible + 2);
+      const end = Math.min(proj.sessions.length, start + maxVisible);
+      for (let i = start; i < end; i++) {
+        const s = proj.sessions[i];
+        const date = s.firstTimestamp ? s.firstTimestamp.slice(0, 10) : '?';
+        const time = s.firstTimestamp ? s.firstTimestamp.slice(11, 16) : '';
+        const line = `  ${s.sessionId.slice(0, 8)}  ${date} ${time}  (${s.lineCount} entries)`;
+        console.log(i === sessionCursor ? `\x1b[33m❯ ${line}\x1b[0m` : `  ${line}`);
+      }
+    }
+  }
+
+  function cleanup() {
+    process.stdin.setRawMode(false);
+    process.stdin.pause();
+    process.stdout.write('\x1b[2J\x1b[H');
+  }
+
+  return new Promise((resolve) => {
+    render();
+
+    process.stdin.on('keypress', (str, key) => {
+      if (!key) return;
+
+      if (key.name === 'q' || key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+        cleanup();
+        resolve(null);
+        return;
+      }
+
+      if (mode === 'projects') {
+        if (key.name === 'up' || key.name === 'k') cursor = Math.max(0, cursor - 1);
+        else if (key.name === 'down' || key.name === 'j') cursor = Math.min(projects.length - 1, cursor + 1);
+        else if (key.name === 'return' || key.name === 'right' || key.name === 'l') {
+          currentProject = projects[cursor];
+          sessionCursor = 0;
+          mode = 'sessions';
+        }
+      } else if (mode === 'sessions') {
+        if (key.name === 'up' || key.name === 'k') sessionCursor = Math.max(0, sessionCursor - 1);
+        else if (key.name === 'down' || key.name === 'j') sessionCursor = Math.min(currentProject.sessions.length - 1, sessionCursor + 1);
+        else if (key.name === 'left' || key.name === 'h' || key.name === 'backspace') mode = 'projects';
+        else if (key.name === 'return' || str === 'v') {
+          cleanup();
+          resolve(currentProject.sessions[sessionCursor].filePath);
+          return;
+        }
+      }
+      render();
+    });
+  });
+}
+
+// ─── Recording Commands ──────────────────────────────
+
+async function cmdRec() {
+  const p = await paths();
+  const { RECORDINGS_DIR } = p;
+
+  mkdirSync(RECORDINGS_DIR, { recursive: true });
+
+  const backend = detectRecBackend();
+  const projectSlug = process.cwd().replace(/[\\/]/g, '-').replace(/^-/, '').split('-').slice(-2).join('-');
+  const shortId = Math.random().toString(36).slice(2, 8);
+  const date = new Date().toISOString().slice(0, 10);
+  const ext = backend === 'asciinema' ? '.cast' : '.typescript';
+  const recPath = join(RECORDINGS_DIR, `${date}-${projectSlug}-${shortId}${ext}`);
+
+  // Determine claude args (pass through everything after 'rec')
+  const claudeArgs = args.filter(a => a !== '--backend' && a !== 'asciinema' && a !== 'script');
+  const claudeCmd = `claude ${claudeArgs.join(' ')}`.trim();
+
+  console.log(`Recording: ${recPath}`);
+  console.log(`Backend:   ${backend}`);
+  console.log(`Command:   ${claudeCmd}\n`);
+
+  if (backend === 'asciinema') {
+    const child = spawn('asciinema', ['rec', '--title', `kiroku ${projectSlug}`, '--command', claudeCmd, recPath], {
+      stdio: 'inherit',
+      shell: true,
+    });
+    child.on('exit', (code) => {
+      console.log(`\nRecording saved: ${recPath}`);
+      console.log(`Replay: kiroku play ${recPath}`);
+      process.exit(code || 0);
+    });
+  } else {
+    // macOS script -q -r <timing-file> <output-file> <command>
+    const child = spawn('script', ['-q', recPath, '/bin/zsh', '-c', claudeCmd], {
+      stdio: 'inherit',
+    });
+    child.on('exit', (code) => {
+      console.log(`\nRecording saved: ${recPath}`);
+      console.log(`Replay: kiroku play ${recPath}`);
+      process.exit(code || 0);
+    });
+  }
+}
+
+async function cmdPlay() {
+  const recPath = args[0];
+  if (!recPath) {
+    console.error('Usage: kiroku play <recording-file>');
+    console.error('       kiroku recs    (list recordings)');
+    process.exit(1);
+  }
+
+  if (!existsSync(recPath)) {
+    // Try from RECORDINGS_DIR
+    const p = await paths();
+    const fullPath = join(p.RECORDINGS_DIR, recPath);
+    if (!existsSync(fullPath)) {
+      console.error(`Recording not found: ${recPath}`);
+      process.exit(1);
+    }
+    args[0] = fullPath;
+  }
+
+  const target = args[0];
+  if (target.endsWith('.cast')) {
+    const child = spawn('asciinema', ['play', target], { stdio: 'inherit' });
+    child.on('exit', (code) => process.exit(code || 0));
+    child.on('error', () => {
+      console.error('asciinema not installed. Install: brew install asciinema');
+      process.exit(1);
+    });
+  } else {
+    // macOS: cat the typescript file (script -p is for BSD playback)
+    const child = spawn('cat', [target], { stdio: 'inherit' });
+    child.on('exit', (code) => process.exit(code || 0));
+  }
+}
+
+async function cmdRecs() {
+  const p = await paths();
+  const { RECORDINGS_DIR } = p;
+
+  if (!existsSync(RECORDINGS_DIR)) {
+    console.log('No recordings found. Use `kiroku rec` to start recording.');
+    return;
+  }
+
+  const files = readdirSync(RECORDINGS_DIR)
+    .filter(f => f.endsWith('.typescript') || f.endsWith('.cast'))
+    .sort()
+    .reverse();
+
+  if (files.length === 0) {
+    console.log('No recordings found. Use `kiroku rec` to start recording.');
+    return;
+  }
+
+  console.log(`Recordings (${files.length}):\n`);
+  for (const f of files) {
+    const fullPath = join(RECORDINGS_DIR, f);
+    const stat = statSync(fullPath);
+    const sizeKB = Math.round(stat.size / 1024);
+    const backend = f.endsWith('.cast') ? 'asciinema' : 'script';
+    console.log(`  ${f}  (${sizeKB} KB, ${backend})`);
+  }
+  console.log(`\nReplay: kiroku play <file>`);
+}
+
+function detectRecBackend() {
+  const forceBackend = args.find((a, i) => args[i - 1] === '--backend');
+  if (forceBackend) return forceBackend;
+  try {
+    execSync('which asciinema', { stdio: 'ignore' });
+    return 'asciinema';
+  } catch {
+    return 'script';
+  }
 }
 
 function sleep(ms) {

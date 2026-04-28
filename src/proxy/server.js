@@ -13,8 +13,31 @@ import { redact } from '../shared/redact.js';
 import { resolveSessionId, getProjectSlug } from '../shared/session-resolver.js';
 import { eventId } from '../shared/ids.js';
 import { logTurnToMarkdown } from './md-logger.js';
+import { join } from 'node:path';
+import { RUN_DIR } from '../shared/paths.js';
 
 const log = createLogger('proxy');
+
+const _upstreamCache = new Map();
+
+function resolveUpstream(projectId, config) {
+  if (projectId) {
+    const cached = _upstreamCache.get(projectId);
+    if (cached && Date.now() - cached.ts < 30_000) return cached.url;
+
+    const filePath = join(RUN_DIR, 'upstream', `${projectId}.txt`);
+    try {
+      if (existsSync(filePath)) {
+        const url = readFileSync(filePath, 'utf8').trim();
+        if (url) {
+          _upstreamCache.set(projectId, { url, ts: Date.now() });
+          return url;
+        }
+      }
+    } catch { /* fall through */ }
+  }
+  return config.proxy.upstream;
+}
 
 export function startProxy(opts = {}) {
   const config = loadConfig();
@@ -139,8 +162,9 @@ export function startProxy(opts = {}) {
         }
       }
 
-      // Forward to upstream
-      const upstream = new URL(config.proxy.upstream);
+      // Forward to upstream (per-project override or default)
+      const upstreamUrl = resolveUpstream(projectId, config);
+      const upstream = new URL(upstreamUrl);
       const headers = { ...req.headers };
       delete headers['host'];
       delete headers['accept-encoding'];

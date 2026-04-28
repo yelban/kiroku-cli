@@ -349,6 +349,14 @@ printf '# Project Memory (auto-loaded)\\n\\n%s\\n' "\$FACTS"
     startedAt: new Date().toISOString(),
   }, null, 2) + '\n');
 
+  // Save original ANTHROPIC_BASE_URL for per-project upstream routing
+  const originalBaseUrl = process.env.ANTHROPIC_BASE_URL;
+  if (originalBaseUrl && !originalBaseUrl.includes('127.0.0.1')) {
+    const upstreamDir = join(p.RUN_DIR, 'upstream');
+    mkdirSync(upstreamDir, { recursive: true });
+    writeFileSync(join(upstreamDir, `${projectSlug}.txt`), originalBaseUrl);
+  }
+
   // Set up environment and launch Claude
   const env = { ...process.env };
   const baseUrl = `http://127.0.0.1:${proxyState.port}/project/${encodeURIComponent(projectSlug)}`;

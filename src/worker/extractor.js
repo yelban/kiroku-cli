@@ -4,6 +4,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { KIROKU_ROOT } from '../shared/paths.js';
 import { createLogger } from '../shared/logger.js';
+import { resolveAnthropicAuth, buildAuthHeaders } from './anthropic-auth.js';
 
 const log = createLogger('extractor');
 
@@ -49,8 +50,8 @@ export async function extract(text, extractionConfig) {
     return await callGemini(text, extractionConfig, apiKey);
   }
 
-  if (provider === 'anthropic' && apiKey) {
-    return await callAnthropic(text, extractionConfig, apiKey);
+  if (provider === 'anthropic') {
+    return await callAnthropic(text, extractionConfig);
   }
 
   if (provider === 'ollama' || !apiKey) {
@@ -126,7 +127,8 @@ async function callGemini(text, config, apiKey) {
   return parseExtractionResult(content);
 }
 
-async function callAnthropic(text, config, apiKey) {
+async function callAnthropic(text, config) {
+  const auth = await resolveAnthropicAuth(config);
   const body = JSON.stringify({
     model: config.model || 'claude-haiku-4-5-20251001',
     max_tokens: config.maxOutputTokens || 1200,
@@ -136,18 +138,19 @@ async function callAnthropic(text, config, apiKey) {
     ],
   });
 
+  const url = new URL(auth.baseUrl);
+  const authHeaders = buildAuthHeaders(auth);
   const data = await httpRequest({
-    hostname: 'api.anthropic.com',
-    port: 443,
-    path: '/v1/messages',
+    hostname: url.hostname,
+    port: parseInt(url.port) || (url.protocol === 'https:' ? 443 : 80),
+    path: (url.pathname.includes('/v1') ? url.pathname.replace(/\/$/, '') : url.pathname.replace(/\/$/, '') + '/v1') + '/messages',
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
+      ...authHeaders,
       'Content-Length': Buffer.byteLength(body),
     },
-    protocol: 'https',
+    protocol: url.protocol.replace(':', ''),
   }, body);
 
   const response = JSON.parse(data);

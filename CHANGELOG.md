@@ -3,6 +3,28 @@
 All notable changes to Kiroku are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.5.0] - 2026-04-29
+
+### Added
+
+#### Multi-Provider Anthropic Auth for Extraction Worker
+- **`src/worker/anthropic-auth.js`**: Unified auth resolution module supporting 4 sources (priority order): `CLAUDE_CODE_OAUTH_TOKEN` env → `ANTHROPIC_AUTH_TOKEN` env → `ANTHROPIC_API_KEY` env → macOS Keychain with auto-refresh
+- OAuth tokens (`sk-ant-oat*`, `eyJ*`, `cc-*`) automatically get Claude Code beta headers (`claude-code-20250219`, `oauth-2025-04-20`) and user-agent spoofing
+- Keychain token refresh via `platform.claude.com/v1/oauth/token` with atomic credential file write-back
+
+#### Dynamic Per-Project Proxy Upstream
+- Proxy routes traffic to custom upstream per project when `ANTHROPIC_BASE_URL` is set before `kiroku start`
+- Stored in `~/.kiroku/run/upstream/<project-slug>.txt`, cached 30s per project
+- Enables mixed sessions: subscription (→ api.anthropic.com) alongside relay/gateway (→ custom URL) on the same machine
+- Reads `ANTHROPIC_BASE_URL` from env vars, project `.env`, or `~/.kiroku/.env`
+
+### Changed
+- **Extraction config**: `provider: "anthropic"` no longer requires `apiKeyEnv` — auth is auto-resolved
+- **`callAnthropic()`**: Refactored to use `resolveAnthropicAuth()` + `buildAuthHeaders()`, supports both Bearer and x-api-key auth with optional custom `baseUrl`
+- **Proxy port**: Fixed at 51989 (configurable) to prevent port changes on restart breaking other sessions
+
+---
+
 ## [1.4.0] - 2026-04-22
 
 ### Added

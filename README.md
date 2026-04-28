@@ -3,7 +3,7 @@
 Compliant AI memory gateway for Claude Code. Side-records conversations, extracts knowledge via LLM, and serves it back through MCP tools.
 
 ```
-Claude Code ──req──▶ Proxy ──passthrough──▶ api.anthropic.com
+Claude Code ──req──▶ Proxy ──passthrough──▶ upstream (api.anthropic.com or custom)
                        │ (SSE side-recording)
                        └──▶ .jsonl queue ──▶ Worker ──▶ SQLite + vec0
                                                            ▲
@@ -26,8 +26,13 @@ Claude Code ◀── MCP stdio ◀── MCP Gateway ────────�
 # Install globally
 npm install -g @kiroku/cli
 
-# Configure extraction API key
-export OPENROUTER_API_KEY=sk-or-v1-your-key-here
+# Configure extraction provider (choose one)
+# Option A: Claude Code OAuth (Max/Pro subscription)
+export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # from `claude setup-token`
+# Option B: Anthropic API key
+export ANTHROPIC_API_KEY=sk-ant-api03-...
+# Option C: OpenRouter
+export OPENROUTER_API_KEY=sk-or-v1-...
 
 # Launch (auto-initializes on first run)
 cd your-project-directory
@@ -44,8 +49,8 @@ Three independent Node.js ESM modules:
 
 | Module | Path | Role |
 |--------|------|------|
-| **kiroku-aegis-proxy** | `src/proxy/` | HTTP passthrough, DLP redaction, SSE side-recording → .jsonl queue |
-| **kiroku-memory-worker** | `src/worker/` | Queue polling, LLM extraction (OpenRouter/Ollama), bge-m3 embedding, SQLite write |
+| **kiroku-aegis-proxy** | `src/proxy/` | HTTP passthrough with per-project dynamic upstream, DLP redaction, SSE side-recording → .jsonl queue |
+| **kiroku-memory-worker** | `src/worker/` | Queue polling, LLM extraction (Anthropic/OpenRouter/Gemini/Ollama), bge-m3 embedding, SQLite write |
 | **kiroku-mcp-gateway** | `src/mcp/` | MCP stdio server with 4 tools + 1 resource |
 
 ### Source Files (29)
@@ -55,7 +60,7 @@ bin/kiroku.js              CLI: init/start/stop/status/doctor/export/reindex/tra
 build.mjs                  esbuild: src/ → dist/ (4 CJS bundles: proxy, worker, mcp, cli)
 src/shared/   (10 files)   config, db, logger, paths, ids, redact, session-resolver, constants, health, audit
 src/proxy/    (5 files)    server, classifier, sse-recorder, queue-writer, md-logger
-src/worker/   (6 files)    worker, extractor, embedder, store, prompt-loader, prompt-crypto
+src/worker/   (7 files)    worker, extractor, anthropic-auth, embedder, store, prompt-loader, prompt-crypto
 src/mcp/      (5 files)    server, memory-search, memory-write, sql-sandbox, health-status
 src/cli/      (1 file)     transcript-converter
 src/license/  (3 files)    Ed25519 verify, machine-id, license-state (LS validate + offline grace)
@@ -143,12 +148,49 @@ Five red lines enforced:
 
 DLP redaction applied before queue storage. SQL sandbox blocks all write operations. Thinking blocks excluded by default.
 
+## Extraction Providers
+
+The worker supports multiple extraction providers (configured in `~/.kiroku/config.json`):
+
+| Provider | Config `provider` | Auth | Notes |
+|----------|------------------|------|-------|
+| **Anthropic** | `anthropic` | Auto-detect (see below) | Recommended. Haiku 4.5 for cost, Sonnet 4.6 for quality |
+| **OpenRouter** | `openrouter` | `OPENROUTER_API_KEY` | Multi-model gateway |
+| **Gemini** | `gemini` | `GEMINI_API_KEY` | Google AI Studio |
+| **OpenAI-compatible** | `openai-compatible` | `apiKeyEnv` config | Any OpenAI-compatible endpoint |
+| **Ollama** | `ollama` | None | Local, free, offline fallback |
+
+### Anthropic Auth Resolution (priority order)
+
+| # | Source | Header |
+|---|--------|--------|
+| 1 | `CLAUDE_CODE_OAUTH_TOKEN` env | `Authorization: Bearer` + OAuth betas |
+| 2 | `ANTHROPIC_AUTH_TOKEN` env | `Authorization: Bearer` |
+| 3 | `ANTHROPIC_API_KEY` env | `x-api-key` |
+| 4 | macOS Keychain (`Claude Code-credentials`) | `Authorization: Bearer` + auto-refresh |
+
+### Proxy Dynamic Upstream
+
+When `ANTHROPIC_BASE_URL` is set before `kiroku start`, the proxy routes that project's traffic to the custom upstream instead of `api.anthropic.com`. This enables relay/gateway usage alongside subscription-based sessions:
+
+```bash
+# Terminal A (subscription, no env vars) → proxy routes to api.anthropic.com
+kiroku start
+
+# Terminal B (relay API)
+export ANTHROPIC_BASE_URL=https://my-relay.example.com
+export ANTHROPIC_AUTH_TOKEN=sk-my-relay-key
+kiroku start   # → proxy routes to my-relay.example.com
+```
+
+Upstream is resolved per-project and stored in `~/.kiroku/run/upstream/<project-slug>.txt`. Also reads from project `.env` and `~/.kiroku/.env`.
+
 ## Requirements
 
 - Node.js >= 20.0.0
 - macOS or Linux
 - Claude Code CLI
-- OpenRouter API key (or local Ollama)
+- Extraction API key (Anthropic, OpenRouter, Gemini, or local Ollama)
 
 ## Dependencies
 

@@ -31,10 +31,11 @@ function resolveUpstream(projectId, config) {
         const url = readFileSync(filePath, 'utf8').trim();
         if (url) {
           _upstreamCache.set(projectId, { url, ts: Date.now() });
+          log.info({ projectId, upstream: url }, 'upstream override');
           return url;
         }
       }
-    } catch { /* fall through */ }
+    } catch (e) { log.warn({ projectId, err: e.message }, 'upstream file read error'); }
   }
   return config.proxy.upstream;
 }
@@ -165,6 +166,9 @@ export function startProxy(opts = {}) {
       // Forward to upstream (per-project override or default)
       const upstreamUrl = resolveUpstream(projectId, config);
       const upstream = new URL(upstreamUrl);
+      if (upstreamUrl !== config.proxy.upstream) {
+        log.info({ projectId, upstream: upstreamUrl, ua: req.headers['user-agent'], auth: authMode, beta: req.headers['anthropic-beta'] || 'none' }, 'upstream forwarding');
+      }
       const headers = { ...req.headers };
       delete headers['host'];
       delete headers['accept-encoding'];

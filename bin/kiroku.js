@@ -350,11 +350,27 @@ printf '# Project Memory (auto-loaded)\\n\\n%s\\n' "\$FACTS"
   }, null, 2) + '\n');
 
   // Save original ANTHROPIC_BASE_URL for per-project upstream routing
-  const originalBaseUrl = process.env.ANTHROPIC_BASE_URL;
+  // Sources (priority): env var > project .env > ~/.kiroku/.env
+  let originalBaseUrl = process.env.ANTHROPIC_BASE_URL;
+  if (!originalBaseUrl || originalBaseUrl.includes('127.0.0.1')) {
+    for (const envFile of [join(process.cwd(), '.env'), join(p.KIROKU_HOME || join(homedir(), '.kiroku'), '.env')]) {
+      if (existsSync(envFile)) {
+        try {
+          const lines = readFileSync(envFile, 'utf8').split('\n');
+          for (const line of lines) {
+            const m = line.match(/^ANTHROPIC_BASE_URL\s*=\s*(.+)/);
+            if (m) { originalBaseUrl = m[1].trim().replace(/^["']|["']$/g, ''); break; }
+          }
+        } catch { /* ignore */ }
+        if (originalBaseUrl && !originalBaseUrl.includes('127.0.0.1')) break;
+      }
+    }
+  }
   if (originalBaseUrl && !originalBaseUrl.includes('127.0.0.1')) {
     const upstreamDir = join(p.RUN_DIR, 'upstream');
     mkdirSync(upstreamDir, { recursive: true });
     writeFileSync(join(upstreamDir, `${projectSlug}.txt`), originalBaseUrl);
+    console.log(`  Upstream: ${originalBaseUrl}`);
   }
 
   // Set up environment and launch Claude

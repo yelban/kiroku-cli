@@ -132,7 +132,13 @@ async function callAnthropic(text, config) {
   const body = JSON.stringify({
     model: config.model || 'claude-haiku-4-5-20251001',
     max_tokens: config.maxOutputTokens || 1200,
-    system: getSystemPrompt(),
+    system: [
+      {
+        type: 'text',
+        text: getSystemPrompt(),
+        cache_control: { type: 'ephemeral' },
+      },
+    ],
     messages: [
       { role: 'user', content: `Extract knowledge from the following conversation turn:\n\n${text}` },
     ],
@@ -154,6 +160,15 @@ async function callAnthropic(text, config) {
   }, body);
 
   const response = JSON.parse(data);
+  const u = response.usage || {};
+  if (u.cache_creation_input_tokens || u.cache_read_input_tokens) {
+    log.info({
+      cache_creation: u.cache_creation_input_tokens || 0,
+      cache_read: u.cache_read_input_tokens || 0,
+      input: u.input_tokens || 0,
+      output: u.output_tokens || 0,
+    }, 'extraction usage');
+  }
   const content = response.content?.[0]?.text;
   if (!content) throw new Error('Empty Anthropic response');
 

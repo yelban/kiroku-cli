@@ -166,10 +166,16 @@ export async function resolveAnthropicAuth(extractionConfig) {
     return { token: oauthEnv, authType: 'bearer', isOAuth: true, baseUrl };
   }
 
-  // Priority 2: ANTHROPIC_AUTH_TOKEN env
+  // Priority 2: ANTHROPIC_AUTH_TOKEN env (likely a relay/gateway, send Claude Code identification)
   const authTokenEnv = process.env.ANTHROPIC_AUTH_TOKEN;
   if (authTokenEnv) {
-    return { token: authTokenEnv, authType: 'bearer', isOAuth: isOAuthToken(authTokenEnv), baseUrl };
+    const isCustomBase = baseUrl !== 'https://api.anthropic.com';
+    return {
+      token: authTokenEnv,
+      authType: 'bearer',
+      isOAuth: isOAuthToken(authTokenEnv) || isCustomBase,
+      baseUrl,
+    };
   }
 
   // Priority 3: ANTHROPIC_API_KEY env (or custom apiKeyEnv from config)

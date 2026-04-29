@@ -466,6 +466,42 @@ A: kiroku 1.6 起改用 **per-bearer-token 動態路由**，每個請求依自�
 
 舊版本（1.5）的 `~/.kiroku/run/upstream/<project>.txt` 在升級後第一次 `kiroku start` 會被自動清除。
 
+### Q: 同個專案目錄、多個終端同時跑 kiroku，可以各自走不同上游嗎？需要為每個終端配 ID 嗎？
+A: 可以、不需要。proxy 是 stateless dispatcher，每個請求依**請求自己帶的 bearer token** 決定上游，根本不在乎是哪個終端送的。只要不同終端用不同的 `ANTHROPIC_AUTH_TOKEN`（或其中之一走訂閱不設 env），就完全獨立。
+
+```
+Terminal A (在 /proj)              Terminal B (在 /proj)
+ANTHROPIC_AUTH_TOKEN=Tx            （沒設 env，走訂閱）
+ANTHROPIC_BASE_URL=relay-1
+   │                                  │
+   ▼ (kiroku start)                   ▼ (kiroku start)
+registerRoute(Tx → relay-1)        skip — Routing: subscription default
+   │                                  │
+   ▼ Authorization: Bearer Tx         ▼ Authorization: Bearer <keychain Ty>
+        ┌────── 共用 proxy daemon ───────┐
+        │ Tx → relay-1 (token-route)     │
+        │ Ty → api.anthropic.com (default)│
+        └────────────────────────────────┘
+```
+
+幾個常見情境：
+
+| 終端 A | 終端 B | 結果 | 需要終端 ID？ |
+|---|---|---|---|
+| 訂閱（keychain `Ty`） | relay R 帶 token `Tx` | A 走 `api.anthropic.com`，B 走 R | 不需要 |
+| relay R1 帶 `Tx` | relay R2 帶 `Ty` | A 走 R1，B 走 R2 | 不需要 |
+| relay R 帶 `Tx` | relay R 帶同樣 `Tx` | 兩者都走 R（idempotent overwrite） | 不需要 |
+| 訂閱（同 `Ty`） | 訂閱（同 `Ty`） | 都走 default | 不需要 |
+| ⚠️ relay R1 帶 `Tx` | ⚠️ relay R2 帶**同一個** `Tx` | 後啟動者覆蓋路由表（last-write-wins），兩個終端都會打到同一個上游 | 設計拒絕支援 |
+
+設計上選 token 當 routing key 的理由：
+
+1. **token = identity**：bearer token 本來就代表「我是誰、我能用哪個後端」。同一個 token 應該打同一個上游，這是不證自明的。
+2. **stateless dispatch**：proxy 不需要追蹤「哪個 PID/終端/session 在說話」，光看每個請求的 header 就能即時判斷，零額外狀態。
+3. **加終端 ID 反而會引入新問題**：要把終端 ID 注入到 Claude Code 發出的請求只剩兩條路 — 改 Anthropic Bearer 格式（不行）或塞自定 header（要求 Claude Code 配合）。token 這條路完全不需要任何協作。
+
+副作用提醒：兩個終端在同一個專案目錄，會把對話寫到同一個 `~/.kiroku/logs/conversations/<project-slug>/`。Claude Code 自己每個 session 是獨立 UUID，所以**對話不會互相覆蓋**，只是檔案會混在一起，要分開只能靠 `session_id` 過濾。
+
 ### Q: 如何備份記憶？
 A: 直接複製 `~/.kiroku/data/memory.sqlite`（WAL mode 下複製前建議先 checkpoint）：
 ```bash

@@ -23,6 +23,8 @@ const ConfigSchema = z.object({
       apiKeyOnly: z.boolean().default(true),
       intervalSeconds: z.number().default(240),
       idleShutdownSeconds: z.number().default(3600),
+      maxLifetimeMinutes: z.number().default(30),
+      onlyWithCacheControl: z.boolean().default(true),
     }).default({}),
     telemetryBlock: z.object({
       enabled: z.boolean().default(true),

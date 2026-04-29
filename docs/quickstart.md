@@ -193,6 +193,53 @@ INFO (worker): processed
     facts: 2
 ```
 
+### 檢查 API-key prompt cache keep-alive（可選）
+
+如果你使用 Anthropic API key 跑 1M context，且想保溫 prompt cache，可以在 `~/.kiroku/config.json` 開啟：
+
+```json
+{
+  "proxy": {
+    "keepAlive": {
+      "enabled": true,
+      "apiKeyOnly": true,
+      "intervalSeconds": 240,
+      "idleShutdownSeconds": 3600,
+      "maxLifetimeMinutes": 30,
+      "onlyWithCacheControl": true
+    }
+  }
+}
+```
+
+限制與安全邊界：
+- 只會在 proxy 觀察到 `x-api-key` 模式的 `/v1/messages` 請求後啟動。
+- 只有請求 body 含 `cache_control` 時才會保存快照。
+- `Authorization: Bearer` 的 session / Pro / Max 模式永不 ping。
+- 快照與 API key 只存在記憶體，不落盤。
+- ping 不會更新 proxy 的全域活動時間，所以不會阻止 idle shutdown。
+
+開啟後重啟：
+
+```bash
+kiroku stop
+kiroku start
+```
+
+閒置約 4 分鐘後，檢查：
+
+```bash
+tail -f ~/.kiroku/logs/keepalive.log | npx pino-pretty
+```
+
+命中 prompt cache 時會看到接近長上下文大小的 `cacheReadTokens`：
+
+```
+INFO (keepalive): ping ok
+    cacheReadTokens: 985000
+    cacheCreationTokens: 0
+```
+
 ### 檢查記憶資料
 
 ```bash
@@ -303,7 +350,7 @@ SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 20;
 ├── bin/kiroku.js            # CLI 入口
 ├── src/
 │   ├── shared/ (11 files)   # 共用模組（含 health, audit）
-│   ├── proxy/ (5 files)     # Proxy 模組（含 md-logger）
+│   ├── proxy/ (6 files)     # Proxy 模組（含 keepalive, md-logger）
 │   ├── worker/ (4 files)    # Worker 模組
 │   ├── mcp/ (5 files)       # MCP Gateway 模組（含 health-status）
 │   ├── cli/ (1 file)        # CLI 子命令（transcript converter）
@@ -328,13 +375,15 @@ SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 20;
 │       └── dead-letter/     # 失敗
 ├── logs/
 │   ├── proxy.log            # Proxy 結構化 log
+│   ├── keepalive.log        # API-key prompt cache keep-alive log（可選）
 │   ├── worker.log           # Worker 結構化 log
 │   ├── mcp.log              # MCP Gateway log
 │   ├── conversations/       # Proxy 即時 Markdown 對話記錄
 │   └── transcripts/         # Transcript converter 輸出
 ├── run/
 │   ├── proxy.state.json     # Proxy PID + port + secret
-│   └── worker.state.json    # Worker PID
+│   ├── worker.state.json    # Worker PID
+│   └── routes/              # 動態上游路由表（key = sha256(bearer token)）
 └── license/                 # 授權檔（可選）
 ```
 
@@ -349,6 +398,14 @@ SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 20;
   "proxy": {
     "port": 0,                          // 0 = 隨機 port
     "upstream": "https://api.anthropic.com",
+    "keepAlive": {
+      "enabled": false,                 // API-key prompt cache keep-alive，預設關閉
+      "apiKeyOnly": true,               // 只允許 x-api-key 模式
+      "intervalSeconds": 240,           // 4 分鐘，低於 ephemeral cache TTL
+      "idleShutdownSeconds": 3600,      // proxy 閒置自動關機
+      "maxLifetimeMinutes": 30,         // 無真實請求後最多保溫時間
+      "onlyWithCacheControl": true      // 只保溫含 cache_control 的請求
+    },
     "sseCaptureEnabled": true,           // 側錄開關
     "storeThinkingBlocks": false,        // 不儲存 thinking 內容
     "markdownLog": {
@@ -398,6 +455,16 @@ A: kiroku-memory 的 4 個 MCP tools 合計約 790 tokens（佔 context 的 0.4%
 
 ### Q: 支援多專案嗎？
 A: 支援。每個專案目錄的 CWD 會轉為 project slug，facts 和 entities 按 project_id 隔離。
+
+### Q: 如何同時讓不同終端走不同上游（中轉站 / 訂閱混用）？
+A: kiroku 1.6 起改用 **per-bearer-token 動態路由**，每個請求依自身 bearer token 決定上游：
+
+- 走中轉站的終端：同時設 `ANTHROPIC_BASE_URL` 與 `ANTHROPIC_AUTH_TOKEN`（兩者缺一不可），然後 `kiroku start`。kiroku 會把 `sha256(token)[:32]` 寫進 `~/.kiroku/run/routes/<hash>.json`，內容只含 `{ upstream, projectSlug, registeredAt }`，原 token 不落盤。
+- 走訂閱（官方 API）的終端：不設這兩個 env，proxy 看不到註冊路由，自動 fallback 到 `proxy.upstream`（預設 `api.anthropic.com`）。
+
+只設 `ANTHROPIC_BASE_URL` 但沒設 `ANTHROPIC_AUTH_TOKEN` 時，`kiroku start` 會印警告並走訂閱預設路徑（這是常見 401 來源）。要切回訂閱模式時不需要清檔，因為訂閱 token 從未註冊在路由表，永遠走預設上游；要清掉舊中轉路由直接刪 `~/.kiroku/run/routes/<hash>.json`。
+
+舊版本（1.5）的 `~/.kiroku/run/upstream/<project>.txt` 在升級後第一次 `kiroku start` 會被自動清除。
 
 ### Q: 如何備份記憶？
 A: 直接複製 `~/.kiroku/data/memory.sqlite`（WAL mode 下複製前建議先 checkpoint）：

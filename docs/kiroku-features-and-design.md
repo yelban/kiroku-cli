@@ -1,6 +1,6 @@
 # Kiroku 功能總覽與設計分析
 
-> 版本：v1.1.3 | 更新日期：2026-03-11
+> 版本：v1.5.0 | 更新日期：2026-04-29
 
 ## 目錄
 
@@ -27,8 +27,8 @@ Kiroku 由三個獨立 Node.js ESM 模組組成，透過檔案佇列（file queu
 ┌──────────────▼──────────────────────────────────────────┐
 │  kiroku-aegis-proxy (src/proxy/)                        │
 │  ┌──────────┐ ┌───────────┐ ┌──────────┐ ┌──────────┐  │
-│  │ Telemetry│ │SSE Recorder│ │DLP Redact│ │MD Logger │  │
-│  │ Blocker  │ │(streaming) │ │(5 rules) │ │(per-turn)│  │
+│  │ Telemetry│ │SSE Recorder│ │DLP Redact│ │Keepalive │  │
+│  │ Blocker  │ │(streaming) │ │(5 rules) │ │(API key) │  │
 │  └──────────┘ └─────┬─────┘ └──────────┘ └──────────┘  │
 │                     │                                   │
 │              .jsonl queue file                           │
@@ -75,6 +75,7 @@ Kiroku 由三個獨立 Node.js ESM 模組組成，透過檔案佇列（file queu
 │   ├── done/            # 已完成
 │   └── dead/            # 重試失敗
 ├── logs/conversations/  # Markdown 對話日誌
+├── logs/keepalive.log   # API-key prompt cache keep-alive log（可選）
 ├── transcripts/         # 轉換後的對話紀錄
 ├── exports/             # 匯出的記憶快照
 ├── cache/               # 加密 prompt 快取
@@ -96,6 +97,7 @@ Kiroku 由三個獨立 Node.js ESM 模組組成，透過檔案佇列（file queu
 | **DLP 脫敏** | 5 組正規表達式（AWS Key、Anthropic/OpenAI/GitHub/Slack Token），自動遮蔽敏感資訊 |
 | **Telemetry 阻擋** | 攔截 `/telemetry`、`/metrics`、`/stats` 請求，回傳 204 |
 | **Markdown 日誌** | 每次對話回合完成後，即時寫入可讀的 `.md` 檔案 |
+| **API-key prompt cache keep-alive** | 可選功能；僅在 `x-api-key` + `cache_control` 請求後，用 `max_tokens=1` ping 保溫 Anthropic prompt cache |
 | **閒置自動關機** | 預設 3600 秒無活動後自動停止（`idleShutdownSeconds`） |
 | **請求分類器** | 辨識 title_generation / suggestion / tool_search / mainline 意圖（僅記錄用） |
 

@@ -3,6 +3,39 @@
 All notable changes to Kiroku are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.6.0] - 2026-04-29
+
+### Changed — Dynamic Upstream now keyed by bearer token
+
+Upstream routing was rewritten from per-project to per-bearer-token. The proxy
+now decides the upstream of each request by hashing the request's bearer
+token (or `x-api-key`) and looking up `~/.kiroku/run/routes/<sha256>.json`. A
+single `kiroku` daemon can now serve multiple terminals simultaneously where
+some go to a relay and others go to subscription `api.anthropic.com`, without
+file-level conflicts between them.
+
+- **New: `src/shared/route-store.js`** — `hashToken`, `registerRoute`,
+  `lookupRoute` (with 30s in-memory cache), and `cleanupLegacyUpstreamDir`.
+  Only the SHA-256 digest of the token is written to disk; the original
+  token is never persisted.
+- **`src/proxy/server.js`**: `resolveUpstream(req, config)` now extracts
+  Bearer / x-api-key from each request and resolves through the route store;
+  log entries for routed requests include `routedBy: 'token-route'`.
+- **`bin/kiroku.js cmdStart`**: reads both `ANTHROPIC_BASE_URL` and
+  `ANTHROPIC_AUTH_TOKEN` (process env → project `.env` → `~/.kiroku/.env`).
+  Both must be set to register a route. Setting only `ANTHROPIC_BASE_URL`
+  prints a warning and falls back to subscription default — this fixes the
+  401 case where a keychain bearer was being misrouted to a relay.
+- **Migration**: legacy `~/.kiroku/run/upstream/<slug>.txt` directory is
+  removed automatically on the first `kiroku start` after upgrade.
+
+### Tests
+
+- **New: `test/proxy/upstream-routing.test.js`** — covers `hashToken`
+  determinism, `registerRoute`/`lookupRoute` round-trip, 30s cache TTL,
+  fallback to default upstream when no token is registered, legacy directory
+  cleanup, and `extractBearerToken` precedence (Bearer over `x-api-key`).
+
 ## [1.5.0] - 2026-04-29
 
 ### Added
@@ -12,11 +45,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - OAuth tokens (`sk-ant-oat*`, `eyJ*`, `cc-*`) automatically get Claude Code beta headers (`claude-code-20250219`, `oauth-2025-04-20`) and user-agent spoofing
 - Keychain token refresh via `platform.claude.com/v1/oauth/token` with atomic credential file write-back
 
-#### Dynamic Per-Project Proxy Upstream
+#### Dynamic Per-Project Proxy Upstream (superseded in 1.6.0)
 - Proxy routes traffic to custom upstream per project when `ANTHROPIC_BASE_URL` is set before `kiroku start`
 - Stored in `~/.kiroku/run/upstream/<project-slug>.txt`, cached 30s per project
 - Enables mixed sessions: subscription (→ api.anthropic.com) alongside relay/gateway (→ custom URL) on the same machine
 - Reads `ANTHROPIC_BASE_URL` from env vars, project `.env`, or `~/.kiroku/.env`
+- **Note (1.6.0)**: rewritten as per-bearer-token routing; legacy upstream directory is automatically removed on upgrade.
+
+#### API-Key Prompt Cache Keep-Alive
+- **`src/proxy/keepalive.js`**: Optional keep-alive for long-context Anthropic API-key sessions, replaying the latest cacheable `/v1/messages` request with `max_tokens=1` and `stream=false`
+- Strictly gated to `x-api-key` auth; `Authorization: Bearer` session / Pro / Max traffic is never pinged
+- Stores snapshots and API key headers in memory only; drops snapshots after `maxLifetimeMinutes` without real user traffic
+- Logs `cache_read_input_tokens` and `cache_creation_input_tokens` to `~/.kiroku/logs/keepalive.log`
+- Adds `/keepalive/status?secret=...` for local status inspection
 
 ### Changed
 - **Extraction config**: `provider: "anthropic"` no longer requires `apiKeyEnv` — auth is auto-resolved

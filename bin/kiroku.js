@@ -349,28 +349,59 @@ printf '# Project Memory (auto-loaded)\\n\\n%s\\n' "\$FACTS"
     startedAt: new Date().toISOString(),
   }, null, 2) + '\n');
 
-  // Save original ANTHROPIC_BASE_URL for per-project upstream routing
-  // Sources (priority): env var > project .env > ~/.kiroku/.env
-  let originalBaseUrl = process.env.ANTHROPIC_BASE_URL;
-  if (!originalBaseUrl || originalBaseUrl.includes('127.0.0.1')) {
-    for (const envFile of [join(process.cwd(), '.env'), join(p.KIROKU_HOME || join(homedir(), '.kiroku'), '.env')]) {
-      if (existsSync(envFile)) {
-        try {
-          const lines = readFileSync(envFile, 'utf8').split('\n');
-          for (const line of lines) {
-            const m = line.match(/^ANTHROPIC_BASE_URL\s*=\s*(.+)/);
-            if (m) { originalBaseUrl = m[1].trim().replace(/^["']|["']$/g, ''); break; }
-          }
-        } catch { /* ignore */ }
-        if (originalBaseUrl && !originalBaseUrl.includes('127.0.0.1')) break;
-      }
+  // Resolve relay routing: ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN must
+  // both be set for this terminal to use a custom upstream. The proxy
+  // discriminates per-bearer-token, so the two together form one route
+  // entry. Missing token falls back to subscription default.
+  // Sources (priority): process env > project .env > ~/.kiroku/.env
+  const envFiles = [join(process.cwd(), '.env'), join(p.KIROKU_HOME || join(homedir(), '.kiroku'), '.env')];
+  const readEnvVar = (name) => {
+    let val = process.env[name];
+    if (val) return val;
+    for (const envFile of envFiles) {
+      if (!existsSync(envFile)) continue;
+      try {
+        const lines = readFileSync(envFile, 'utf8').split('\n');
+        for (const line of lines) {
+          const m = line.match(new RegExp('^' + name + '\\s*=\\s*(.+)'));
+          if (m) return m[1].trim().replace(/^["']|["']$/g, '');
+        }
+      } catch { /* ignore */ }
     }
-  }
-  if (originalBaseUrl && !originalBaseUrl.includes('127.0.0.1')) {
-    const upstreamDir = join(p.RUN_DIR, 'upstream');
-    mkdirSync(upstreamDir, { recursive: true });
-    writeFileSync(join(upstreamDir, `${projectSlug}.txt`), originalBaseUrl);
-    console.log(`  Upstream: ${originalBaseUrl}`);
+    return undefined;
+  };
+
+  let originalBaseUrl = readEnvVar('ANTHROPIC_BASE_URL');
+  if (originalBaseUrl && originalBaseUrl.includes('127.0.0.1')) originalBaseUrl = undefined;
+  const originalAuthToken = readEnvVar('ANTHROPIC_AUTH_TOKEN');
+
+  // One-time legacy migration: drop pre-1.6 per-project upstream files
+  try {
+    const { cleanupLegacyUpstreamDir } = await import('../src/shared/route-store.js');
+    const cleaned = cleanupLegacyUpstreamDir();
+    if (cleaned.removed) {
+      console.log('  Migrated: removed legacy ~/.kiroku/run/upstream/ (now keyed per bearer token)');
+    }
+  } catch { /* ignore — legacy dir may not exist */ }
+
+  if (originalBaseUrl && originalAuthToken) {
+    try {
+      const { registerRoute } = await import('../src/shared/route-store.js');
+      const result = registerRoute({
+        token: originalAuthToken,
+        upstream: originalBaseUrl,
+        projectSlug,
+      });
+      const tag = result?.hash ? `bearer-${result.hash.slice(0, 8)}` : 'bearer-?';
+      console.log(`  Routing: ${tag} → ${originalBaseUrl}`);
+    } catch (err) {
+      console.log(`  Warning: failed to register route (${err.message}); falling back to default upstream`);
+    }
+  } else if (originalBaseUrl && !originalAuthToken) {
+    console.log(`  Warning: ANTHROPIC_BASE_URL=${originalBaseUrl} set but ANTHROPIC_AUTH_TOKEN missing`);
+    console.log('  Routing: subscription default (api.anthropic.com) — set ANTHROPIC_AUTH_TOKEN to route to your relay');
+  } else {
+    console.log('  Routing: subscription default (api.anthropic.com)');
   }
 
   // Set up environment and launch Claude

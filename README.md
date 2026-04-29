@@ -18,6 +18,7 @@ Claude Code ◀── MCP stdio ◀── MCP Gateway ────────�
 - **5 MCP tools** — `memory_search`, `memory_save`, `memory_forget`, `sql_readonly`, `health_status`
 - **DLP redaction** — Strips AWS keys, API tokens, GitHub PATs before storage
 - **Multi-project isolation** — Facts and entities scoped by project ID
+- **API-key prompt cache keep-alive** — Optional Anthropic prompt-cache ping for long-context API sessions, never used in subscription/session mode
 - **One-command launch** — `kiroku start` spawns proxy + worker + MCP + Claude Code
 
 ## Quick Start
@@ -49,17 +50,17 @@ Three independent Node.js ESM modules:
 
 | Module | Path | Role |
 |--------|------|------|
-| **kiroku-aegis-proxy** | `src/proxy/` | HTTP passthrough with per-project dynamic upstream, DLP redaction, SSE side-recording → .jsonl queue |
+| **kiroku-aegis-proxy** | `src/proxy/` | HTTP passthrough with per-bearer-token dynamic upstream, optional API-key prompt-cache keep-alive, DLP redaction, SSE side-recording → .jsonl queue |
 | **kiroku-memory-worker** | `src/worker/` | Queue polling, LLM extraction (Anthropic/OpenRouter/Gemini/Ollama), bge-m3 embedding, SQLite write |
 | **kiroku-mcp-gateway** | `src/mcp/` | MCP stdio server with 4 tools + 1 resource |
 
-### Source Files (29)
+### Source Files
 
 ```
 bin/kiroku.js              CLI: init/start/stop/status/doctor/export/reindex/transcript/activate/deactivate/license
 build.mjs                  esbuild: src/ → dist/ (4 CJS bundles: proxy, worker, mcp, cli)
 src/shared/   (10 files)   config, db, logger, paths, ids, redact, session-resolver, constants, health, audit
-src/proxy/    (5 files)    server, classifier, sse-recorder, queue-writer, md-logger
+src/proxy/    (6 files)    server, keepalive, classifier, sse-recorder, queue-writer, md-logger
 src/worker/   (7 files)    worker, extractor, anthropic-auth, embedder, store, prompt-loader, prompt-crypto
 src/mcp/      (5 files)    server, memory-search, memory-write, sql-sandbox, health-status
 src/cli/      (1 file)     transcript-converter
@@ -128,7 +129,7 @@ All runtime data lives in `~/.kiroku/`:
 ├── data/
 │   ├── memory.sqlite        # SQLite + WAL + sqlite-vec
 │   └── queue/{incoming,processing,done,dead-letter}/
-├── logs/{proxy,worker,mcp}.log
+├── logs/{proxy,keepalive,worker,mcp}.log
 └── run/{proxy,worker}.state.json
 ```
 
@@ -147,6 +148,29 @@ Five red lines enforced:
 | R5 | Private keys never in repository |
 
 DLP redaction applied before queue storage. SQL sandbox blocks all write operations. Thinking blocks excluded by default.
+
+## API-Key Prompt Cache Keep-Alive
+
+The proxy can optionally keep Anthropic prompt cache warm for long-context API-key sessions. This is useful for 1M-context API workflows where a cached prefix would otherwise expire after a short idle period.
+
+It is disabled by default and only activates after the proxy observes a real `/v1/messages` request using `x-api-key` auth with at least one `cache_control` marker. Subscription/session traffic (`Authorization: Bearer`) is never pinged.
+
+```json
+{
+  "proxy": {
+    "keepAlive": {
+      "enabled": true,
+      "apiKeyOnly": true,
+      "intervalSeconds": 240,
+      "idleShutdownSeconds": 3600,
+      "maxLifetimeMinutes": 30,
+      "onlyWithCacheControl": true
+    }
+  }
+}
+```
+
+The ping replays the latest cacheable request in memory with `max_tokens: 1` and `stream: false`, logs cache usage to `~/.kiroku/logs/keepalive.log`, and drops the snapshot after `maxLifetimeMinutes` without real user traffic. It does not update proxy activity, so it will not prevent idle shutdown.
 
 ## Extraction Providers
 
@@ -169,21 +193,30 @@ The worker supports multiple extraction providers (configured in `~/.kiroku/conf
 | 3 | `ANTHROPIC_API_KEY` env | `x-api-key` |
 | 4 | macOS Keychain (`Claude Code-credentials`) | `Authorization: Bearer` + auto-refresh |
 
-### Proxy Dynamic Upstream
+### Proxy Dynamic Upstream (per bearer token)
 
-When `ANTHROPIC_BASE_URL` is set before `kiroku start`, the proxy routes that project's traffic to the custom upstream instead of `api.anthropic.com`. This enables relay/gateway usage alongside subscription-based sessions:
+The proxy decides per request which upstream to forward to, keyed on the request's bearer token. This lets multiple terminals share one kiroku proxy daemon while routing to different upstreams independently.
 
 ```bash
 # Terminal A (subscription, no env vars) → proxy routes to api.anthropic.com
 kiroku start
 
-# Terminal B (relay API)
+# Terminal B (relay API) — both vars are required
 export ANTHROPIC_BASE_URL=https://my-relay.example.com
 export ANTHROPIC_AUTH_TOKEN=sk-my-relay-key
-kiroku start   # → proxy routes to my-relay.example.com
+kiroku start   # registers route: bearer-<hash> → my-relay.example.com
 ```
 
-Upstream is resolved per-project and stored in `~/.kiroku/run/upstream/<project-slug>.txt`. Also reads from project `.env` and `~/.kiroku/.env`.
+How resolution works:
+
+- `kiroku start` reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` from `process.env`, project `.env`, then `~/.kiroku/.env`.
+- When **both** are set, kiroku writes `~/.kiroku/run/routes/<sha256(token)[:32]>.json` with `{ upstream, projectSlug, registeredAt }`. The token itself is never written to disk; only its hash.
+- When only `ANTHROPIC_BASE_URL` is set (no token), kiroku prints a warning and does not register a route — the request will fall back to subscription mode and likely 401 against the relay.
+- When neither is set, the request goes to the configured `proxy.upstream` (default `api.anthropic.com`).
+
+The proxy looks up the bearer of every incoming request in this routing table. Stale entries are harmless: a token that never reappears never gets matched. To force re-registration, run `kiroku start` again with the desired env. Upgrading from older versions automatically removes the legacy `~/.kiroku/run/upstream/` directory.
+
+Because routing is keyed on the credential the request actually carries, **multiple terminals — including in the same project directory — can share one kiroku daemon and use different upstreams independently**. No per-terminal session ID is needed; as long as each terminal uses a different `ANTHROPIC_AUTH_TOKEN` (or the default subscription falls through), the proxy dispatches correctly per request.
 
 ## Requirements
 

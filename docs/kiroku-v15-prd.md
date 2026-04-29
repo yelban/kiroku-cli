@@ -261,7 +261,9 @@ kiroku-v15/
       "enabled": false,
       "apiKeyOnly": true,
       "intervalSeconds": 240,
-      "idleShutdownSeconds": 3600
+      "idleShutdownSeconds": 3600,
+      "maxLifetimeMinutes": 30,
+      "onlyWithCacheControl": true
     },
     "telemetryBlock": {
       "enabled": true,
@@ -887,12 +889,13 @@ kiroku export        # 匯出記憶
 |---|------|
 | D1 | Port 策略：隨機 port + state file（沿用 V14 模式）|
 | D2 | MCP 工具：4 tools (memory_search, sql_readonly, memory_save, memory_forget) + 1 resource |
-| D3 | Keepalive：M1 實作 dual-mode auth 嗅探 + keepalive 基礎設施，config 預設 `enabled=false` |
+| D3 | Keepalive：API-key prompt cache keep-alive 已實作；只在 `x-api-key` 模式、含 `cache_control` 的 `/v1/messages` 請求後啟動，config 預設 `enabled=false` |
 | D4 | `@huggingface/transformers` v3 取代 `@xenova/transformers` v2 |
 | D5 | Proxy 用 raw `node:http/https`，不引入 http-proxy/undici |
 | D6 | V15 主 repo 不再出現 `god-mode` 命名 |
 | D7 | `sqlite-vec` 版本鎖死 ^0.1.6 |
 | D8 | `Xenova/bge-m3` 維度固定 1024 |
+| D9 | Dynamic upstream key = bearer token：proxy 每次請求依 `Authorization: Bearer` 或 `x-api-key` 雜湊查 `~/.kiroku/run/routes/<sha256>`，未命中走 `proxy.upstream`。`kiroku start` 必須 `ANTHROPIC_BASE_URL` 與 `ANTHROPIC_AUTH_TOKEN` 同設才會註冊路由；token 不落盤；舊 `~/.kiroku/run/upstream/` 升級時自動清除 |
 
 ## 17. 未解決問題
 
@@ -913,4 +916,4 @@ kiroku export        # 匯出記憶
 | Q3 | CLAUDE.md 是否可追加？ | `kiroku init` 一次性追加 `## Memory (Kiroku)` 區塊 |
 | Q4 | Port 策略 | 隨機 port + state file (沿用 V14) |
 | Q5 | MCP 工具數量 | 4 tools (search, sql, save, forget) + 1 resource |
-| Q6 | Keepalive 實作時機 | M1 實作 dual-mode auth 嗅探 + keepalive 基礎設施，預設關閉 |
+| Q6 | Keepalive 實作時機 | 已實作 API-key prompt cache keep-alive：`max_tokens=1`、`stream=false`、保留 `cache_control`，30 分鐘無真實請求後丟棄記憶體快照 |

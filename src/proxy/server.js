@@ -1,7 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { URL } from 'node:url';
 import { loadConfig } from '../shared/config.js';
 import { createLogger } from '../shared/logger.js';
@@ -13,31 +13,42 @@ import { redact } from '../shared/redact.js';
 import { resolveSessionId, getProjectSlug } from '../shared/session-resolver.js';
 import { eventId } from '../shared/ids.js';
 import { logTurnToMarkdown } from './md-logger.js';
-import { join } from 'node:path';
-import { RUN_DIR } from '../shared/paths.js';
+import * as keepalive from './keepalive.js';
+import { lookupRoute } from '../shared/route-store.js';
 
 const log = createLogger('proxy');
 
-const _upstreamCache = new Map();
-
-function resolveUpstream(projectId, config) {
-  if (projectId) {
-    const cached = _upstreamCache.get(projectId);
-    if (cached && Date.now() - cached.ts < 30_000) return cached.url;
-
-    const filePath = join(RUN_DIR, 'upstream', `${projectId}.txt`);
-    try {
-      if (existsSync(filePath)) {
-        const url = readFileSync(filePath, 'utf8').trim();
-        if (url) {
-          _upstreamCache.set(projectId, { url, ts: Date.now() });
-          log.info({ projectId, upstream: url }, 'upstream override');
-          return url;
-        }
-      }
-    } catch (e) { log.warn({ projectId, err: e.message }, 'upstream file read error'); }
+/**
+ * Pull the bearer token (or x-api-key) out of an incoming request. This
+ * value is the routing discriminator: the proxy never inspects the calling
+ * shell, only the credential the request actually carries.
+ */
+function extractBearerToken(req) {
+  const auth = req.headers['authorization'];
+  if (typeof auth === 'string') {
+    const m = auth.match(/^Bearer\s+(.+)$/i);
+    if (m) return m[1].trim();
   }
-  return config.proxy.upstream;
+  const apiKey = req.headers['x-api-key'];
+  if (typeof apiKey === 'string' && apiKey.length > 0) return apiKey;
+  return null;
+}
+
+/**
+ * Per-token upstream resolution. A request with a registered bearer token
+ * is forwarded to that token's relay; everything else (including all
+ * keychain-backed subscription traffic) falls through to the default
+ * configured upstream (api.anthropic.com).
+ */
+function resolveUpstream(req, config) {
+  const token = extractBearerToken(req);
+  if (token) {
+    const route = lookupRoute(token);
+    if (route?.upstream) {
+      return { upstream: route.upstream, routedBy: 'token-route' };
+    }
+  }
+  return { upstream: config.proxy.upstream, routedBy: 'default' };
 }
 
 export function startProxy(opts = {}) {
@@ -67,6 +78,11 @@ export function startProxy(opts = {}) {
       if (url.pathname === '/heartbeat' && qs === secret) {
         lastActivity = Date.now();
         res.writeHead(200); res.end('ALIVE');
+        return;
+      }
+      if (url.pathname === '/keepalive/status' && qs === secret) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(keepalive.getStatus()));
         return;
       }
       if (url.pathname === '/health') {
@@ -163,11 +179,25 @@ export function startProxy(opts = {}) {
         }
       }
 
-      // Forward to upstream (per-project override or default)
-      const upstreamUrl = resolveUpstream(projectId, config);
+      // Forward to upstream — bearer-token routed, default if no match
+      const { upstream: upstreamUrl, routedBy } = resolveUpstream(req, config);
       const upstream = new URL(upstreamUrl);
-      if (upstreamUrl !== config.proxy.upstream) {
-        log.info({ projectId, upstream: upstreamUrl, ua: req.headers['user-agent'], auth: authMode, beta: req.headers['anthropic-beta'] || 'none' }, 'upstream forwarding');
+      if (routedBy === 'token-route') {
+        log.info({ projectId, upstream: upstreamUrl, ua: req.headers['user-agent'], auth: authMode, beta: req.headers['anthropic-beta'] || 'none', routedBy }, 'upstream forwarding');
+      }
+
+      if (isMessagesEndpoint && json) {
+        try {
+          keepalive.captureSnapshot({
+            projectId: projectId || 'default',
+            body: json,
+            headers: req.headers,
+            upstreamUrl,
+            authMode,
+          });
+        } catch (err) {
+          log.warn({ err: err.message }, 'keepalive capture failed');
+        }
       }
       const headers = { ...req.headers };
       delete headers['host'];
@@ -264,6 +294,8 @@ export function startProxy(opts = {}) {
     writeFileSync(PROXY_STATE_PATH, JSON.stringify(state));
     log.info({ port: assignedPort }, 'proxy started');
 
+    keepalive.start(config);
+
     if (opts.onReady) opts.onReady(state);
   });
 
@@ -278,6 +310,7 @@ export function startProxy(opts = {}) {
 
   function cleanup() {
     clearInterval(idleTimer);
+    keepalive.stop();
     try { if (existsSync(PROXY_STATE_PATH)) unlinkSync(PROXY_STATE_PATH); } catch {}
     server.close();
   }

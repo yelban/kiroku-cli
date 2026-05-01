@@ -192,20 +192,37 @@ tail -f ~/.kiroku/logs/worker.log    | grep -E 'turn skipped by filter|throttled
    ```
    兩層 limit 同時生效：**並發 burst limit**（Sonnet ≤ 2）+ **滾動 window quota**（5h / 7d）。多 session 並用 + worker Sonnet batch 容易撞前者。
 
-### 三種 worker provider 配置（各自取捨）
+### 為什麼訂閱反而會爆、API Key 反而便宜
 
-A. **OpenRouter / Gemini Flash（預設）**
-```json
-"extraction": {
-  "provider": "openrouter",
-  "model": "google/gemini-2.0-flash-001",
-  "apiKeyEnv": "OPENROUTER_API_KEY"
-}
-```
-- 成本：$0-2/month（Gemini Flash 免費 quota 內）
-- 限制：無 prompt caching、batch 模式不支援（`extractBatch` 只 anthropic provider）
+| 模式 | 賣什麼 | 限制設計目的 |
+|---|---|---|
+| Claude Pro / Max 訂閱（OAuth） | 「使用 Claude Code 工具的權利」 | 防止濫用，**為人類對話節奏設計** |
+| 任何 API Key | 純 token 計費 | 商用基礎設施，**為 24h 服務設計** |
 
-B. **OAuth Max 訂閱 + Haiku 4.5**（多 session 推薦）
+worker 是 daemon 不停跑 batch extraction——這個 use case 不在訂閱的 design intent 裡。Anthropic 對 Sonnet 4.6 把 burst limit 卡到 ≤ 2 並發，就是為了防止 $20-200 訂閱被當 24h 推論服務用。
+
+API Key 反而便宜是因為 worker extraction 真實用量很少（每天可能 < 1M token）。換成 token-priced 模式，daemon 一個月只用幾百萬 token。
+
+### 模型對照（2026-05 實測 / Phase 2 batch 配 anthropic-only）
+
+| Model | Provider | input/$M | output/$M | 月費估 (100 turn/day) | batch+cache |
+|---|---|---|---|---|---|
+| Gemini 2.0 Flash | OpenRouter | 0.10 | 0.40 | **~$0.6** | 不支援 |
+| Gemini 3 Flash | Google direct | 0.50 | 3.00 | ~$4 | 不支援 |
+| GPT-5.4 Nano | OpenAI direct | 0.20 | 1.25 | **~$1.5** | 不支援 |
+| GPT-5.4 Mini | OpenAI direct | 0.75 | 4.50 | ~$6 | 不支援 |
+| DeepSeek V3.2 | OpenRouter | 0.25 | 0.38 | **~$1.5** | 不支援 |
+| Qwen 2.5 32B | OpenRouter | 0.16 | 0.97 | ~$1.5（JSON 最穩） | 不支援 |
+| Claude Haiku 4.5 | Anthropic API Key | 0.80 | 4.00 | **~$3** | ✅ |
+| Claude Sonnet 4.6 | Anthropic API Key | 3.00 | 15.00 | ~$8-15 | ✅ |
+| Claude Sonnet 4.6 | OAuth Max 訂閱 | 訂閱 | 訂閱 | $0 | ✅ but burst ≤ 2 |
+| Claude Haiku 4.5 | OAuth Max 訂閱 | 訂閱 | 訂閱 | $0 | ✅ burst ≥ 5 |
+
+**重要：`extractBatch` + prompt caching 只 anthropic provider 支援。** 其他 provider 走 `extract()` 單筆 path（filter / throttle / effort 仍生效，但無法享受 ~70% input token 攤銷）。所以 batch+cache 攤銷後的 Haiku 4.5 ($3/月) 很接近單筆的 GPT-5.4 Nano ($1.5/月) 但有 batch 容錯加成。
+
+### Provider 配置選單（按 use case 三選一）
+
+A. **訂閱 Claude Pro/Max + 多 session 並用** — Haiku 4.5（burst 寬鬆）
 ```json
 "extraction": {
   "provider": "anthropic",
@@ -214,10 +231,68 @@ B. **OAuth Max 訂閱 + Haiku 4.5**（多 session 推薦）
   "batch": { "enabled": true, "maxTurnsPerCall": 5 }
 }
 ```
-- 成本：訂閱已付，無額外
-- 限制：burst 寬鬆 5x（Haiku ≥ 5 並發），但 5h/7d window quota 仍跟對話共用；extraction 品質略低於 Sonnet
+- 成本：$0（訂閱已付）
+- 風險：5h / 7d window quota 仍跟對話共用、品質略低於 Sonnet
+- token sync：1.7.4 reconcile 三道防線自動處理
 
-C. **API Key + Sonnet 4.6**（重 batch / 多 session 推薦）
+B. **省錢極致 / 不在乎 batch** — 任一便宜模型走單筆 path
+
+OpenRouter + DeepSeek V3.2：
+```json
+"extraction": {
+  "provider": "openrouter",
+  "model": "deepseek/deepseek-v3.2",
+  "apiKeyEnv": "OPENROUTER_API_KEY"
+}
+```
+
+OpenRouter + Qwen 2.5 32B（JSON 抽取最穩）：
+```json
+"extraction": {
+  "provider": "openrouter",
+  "model": "qwen/qwen-2.5-32b-instruct",
+  "apiKeyEnv": "OPENROUTER_API_KEY"
+}
+```
+
+OpenAI direct + GPT-5.4 Nano（最低單價）：
+```json
+"extraction": {
+  "provider": "openai-compatible",
+  "model": "gpt-5.4-nano",
+  "baseUrl": "https://api.openai.com/v1",
+  "apiKeyEnv": "OPENAI_API_KEY"
+}
+```
+
+Google Gemini direct + Gemini 3 Flash：
+```json
+"extraction": {
+  "provider": "gemini",
+  "model": "gemini-3-flash-preview",
+  "apiKeyEnv": "GEMINI_API_KEY"
+}
+```
+
+當前預設（Gemini 2.0 Flash via OpenRouter，最便宜）：
+```json
+"extraction": {
+  "provider": "openrouter",
+  "model": "google/gemini-2.0-flash-001",
+  "apiKeyEnv": "OPENROUTER_API_KEY"
+}
+```
+
+- 成本：$0.5-4/月
+- 風險：無 batch / 無 cache、entity-fact JSON 品質略差於 Anthropic
+- 設定：把對應 API key 放進 `~/.kiroku/.env`：
+  ```bash
+  echo "OPENROUTER_API_KEY=sk-or-..." >> ~/.kiroku/.env
+  echo "OPENAI_API_KEY=sk-..." >> ~/.kiroku/.env
+  echo "GEMINI_API_KEY=..." >> ~/.kiroku/.env
+  ```
+
+C. **重 batch / 多 session / 高品質** — Anthropic API Key + Sonnet 4.6
 ```json
 "extraction": {
   "provider": "anthropic",
@@ -229,16 +304,18 @@ C. **API Key + Sonnet 4.6**（重 batch / 多 session 推薦）
 ```
 ```bash
 # 從 https://console.anthropic.com 拿 sk-ant-api03-... key
-echo "ANTHROPIC_API_KEY=sk-ant-api03-..." >> ~/.kiroku/.env
-# 移除 CLAUDE_CODE_OAUTH_TOKEN（讓 priority 落到 #3 API key 路徑）
+# 編輯 ~/.kiroku/.env：
+#   - 移除 CLAUDE_CODE_OAUTH_TOKEN（必須，否則 worker 仍走 OAuth）
+#   - 加入 ANTHROPIC_API_KEY=sk-ant-api03-...
 kiroku stop && kiroku start
 ```
-- 成本（Phase 2 batch + cache 攤銷後）：
-  - 50 turn/day ≈ **$3/月**
-  - 100 turn/day ≈ **$5-8/月**
-  - 500 turn/day ≈ **$25-40/月**
-- 限制：脫離 OAuth Max 全部 quota / burst limit；按用量計費
-- 為什麼比訂閱便宜：訂閱賣的是「人類對話節奏的容量」（限速嚴），API Key 賣 token 量（worker extraction 用量真的很少）
+
+> Claude Code session 完全不受影響——它讀的是 macOS Keychain `Claude Code-credentials`，不讀 `~/.kiroku/.env`。`.env` 只給 kiroku worker 用。
+- 成本：50 turn/day ≈ $3、100 turn/day ≈ $5-8、500 turn/day ≈ $25-40
+- 收益：脫離 OAuth burst limit、token sync / 401 reconcile / quota 撞牆都不再是問題
+- 1.7.x 的 OAuth 自動 reconcile 在這條路徑下無感（沒設 `CLAUDE_CODE_OAUTH_TOKEN` → `reconcileOauthToken()` 直接 return false 跳過）
+
+> 💡 `anthropic-auth.js` 的 priority：`CLAUDE_CODE_OAUTH_TOKEN` > `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY`。worker 走 API Key 必須**移除前兩者**，或在 config 設 `apiKeyEnv: "ANTHROPIC_API_KEY"` 並確保前兩者沒設。
 
 ### 緩解 burst（如果一定要用 OAuth Sonnet）
 

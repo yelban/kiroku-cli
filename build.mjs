@@ -13,6 +13,9 @@ const shared = {
   format: 'cjs',
   minify: true,
   sourcemap: false,
+  loader: {
+    '.md': 'text',
+  },
   external: [
     'better-sqlite3',
     'sqlite-vec',

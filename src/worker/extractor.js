@@ -6,6 +6,7 @@ import { KIROKU_ROOT } from '../shared/paths.js';
 import { createLogger } from '../shared/logger.js';
 import { resolveAnthropicAuth, buildAuthHeaders } from './anthropic-auth.js';
 import { createBatchStreamParser } from './batch-parser.js';
+import EMBEDDED_BATCH_PROMPT from '../../prompts/extraction-batch.md';
 
 const log = createLogger('extractor');
 
@@ -50,12 +51,13 @@ function getSystemPrompt() {
 
 function getBatchSystemPrompt() {
   if (_batchSystemPrompt) return _batchSystemPrompt;
+  // Dev path: prefer fs read so prompts/extraction-batch.md edits live-reload after `npm run build`.
+  // Production (npm-installed) bundles do not ship prompts/, so fall back to the embedded copy.
   const path = join(KIROKU_ROOT, 'prompts', 'extraction-batch.md');
   if (existsSync(path)) {
     _batchSystemPrompt = readFileSync(path, 'utf8');
   } else {
-    log.warn({ path }, 'extraction-batch.md missing, falling back to single-turn prompt');
-    _batchSystemPrompt = getSystemPrompt();
+    _batchSystemPrompt = EMBEDDED_BATCH_PROMPT;
   }
   return _batchSystemPrompt;
 }

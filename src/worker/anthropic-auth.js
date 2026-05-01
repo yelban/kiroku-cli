@@ -159,6 +159,29 @@ async function refreshToken(creds) {
   return null;
 }
 
+// Detect when the env token (e.g. ~/.kiroku/.env) is stale relative to the
+// Claude Code Keychain (Claude Code session rotated tokens). When stale,
+// promote the Keychain token into process.env so priority-1 callers pick
+// up the fresh one without a 401 round trip. Returns whether a swap occurred.
+export function reconcileOauthToken() {
+  if (platform() !== 'darwin') return false;
+  const envTok = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (!envTok) return false;
+  const kc = readFromKeychain();
+  if (!kc?.accessToken || kc.accessToken === envTok) return false;
+  if (!isValid(kc)) {
+    log.warn('env OAuth token differs from Keychain but Keychain copy is also expired; keeping env');
+    return false;
+  }
+  log.warn({
+    envTail: envTok.slice(-8),
+    keychainTail: kc.accessToken.slice(-8),
+  }, 'env OAuth token differs from Keychain — promoting Keychain (Claude Code session likely rotated)');
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = kc.accessToken;
+  _cached = kc;
+  return true;
+}
+
 export async function resolveAnthropicAuth(extractionConfig) {
   const baseUrl = extractionConfig.baseUrl || 'https://api.anthropic.com';
 

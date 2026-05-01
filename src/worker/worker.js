@@ -13,6 +13,7 @@ import { setDb, storeTurn, storeEntities, storeFacts, storeEmbeddings, createExt
 import { getLicenseState } from '../license/license-state.js';
 import { shouldSkipTurn } from './filter.js';
 import { createThrottle } from './throttle.js';
+import { reconcileOauthToken } from './anthropic-auth.js';
 
 const log = createLogger('worker');
 
@@ -38,6 +39,9 @@ export async function startWorker() {
   }
 
   log.info('initializing worker');
+
+  // If env CLAUDE_CODE_OAUTH_TOKEN is stale vs Keychain, promote Keychain.
+  try { reconcileOauthToken(); } catch (err) { log.warn({ err: err.message }, 'oauth reconcile failed'); }
 
   // Initialize DB
   const db = await initDb();

@@ -177,19 +177,79 @@ tail -f ~/.kiroku/logs/worker.log    | grep -E 'turn skipped by filter|throttled
 6. **舊 worker 在 sync block 中對 `SIGTERM` 無回應**
    1.7.0 worker 卡 sweep 時 event loop 鎖死，`kiroku stop` 發 SIGTERM 也不退。要 `kill -KILL <pid>` 才能殺。1.7.2+ 因 sweep 改 async + yield，SIGTERM handler 會在下一輪 yield 觸發、能正常退出。
 
-7. **多 Claude Code session 共用 OAuth Max quota**
-   OAuth Max quota 是**帳號級**（5 小時 rolling window）。多個並行 session + kiroku worker batch extraction 全部一起算。重 batch 流量場景容易撞「rate_limit_error」（即使 token 有效）。
-   緩解選項：
-   - 開保守 batch：`maxTurnsPerCall=3` 而非 5、`flushTimeoutMs=30000`
-   - 開 throttle 嚴一點：`worker.throttle.maxCallsPerMinute=10`
-   - **徹底分離（推薦）**：worker 改走 API Key，跟 Claude Code session 完全獨立 quota：
-     ```bash
-     # 從 https://console.anthropic.com 拿 sk-ant-api03-... key
-     echo "ANTHROPIC_API_KEY=sk-ant-api03-..." >> ~/.kiroku/.env
-     # 移掉 CLAUDE_CODE_OAUTH_TOKEN 那行（讓 priority 走到 #3 API key）
-     kiroku stop && kiroku start
-     ```
-     extraction 用量低（~330 tokens/turn 加 cache 命中）、Sonnet 4.6 input $3/M output $15/M、每天 100 turn 估 ~$0.05/day。
+7. **多 Claude Code session + 訂閱 OAuth = Sonnet burst 撞牆**
+   OAuth Max 訂閱賣的是「人類對話用量」，不是 daemon 推論用量。實測（2026-05-01，Pro tier）：
+   ```
+   Sonnet 4.6  3 並發 → 15/15 全 429
+   Haiku 4.5   5 並發 → 25/25 全 200
+   ```
+   ratelimit headers 揭露真實結構（用 `curl -i` 看 200 response）：
+   ```
+   anthropic-ratelimit-unified-5h-utilization:        0.31  ← 5h 累積 31%
+   anthropic-ratelimit-unified-7d-utilization:        0.63  ← 7d 累積 63%
+   anthropic-ratelimit-unified-7d_sonnet-utilization: 0.01  ← Sonnet 單獨 7d 配額
+   anthropic-ratelimit-unified-representative-claim:  five_hour
+   ```
+   兩層 limit 同時生效：**並發 burst limit**（Sonnet ≤ 2）+ **滾動 window quota**（5h / 7d）。多 session 並用 + worker Sonnet batch 容易撞前者。
+
+### 三種 worker provider 配置（各自取捨）
+
+A. **OpenRouter / Gemini Flash（預設）**
+```json
+"extraction": {
+  "provider": "openrouter",
+  "model": "google/gemini-2.0-flash-001",
+  "apiKeyEnv": "OPENROUTER_API_KEY"
+}
+```
+- 成本：$0-2/month（Gemini Flash 免費 quota 內）
+- 限制：無 prompt caching、batch 模式不支援（`extractBatch` 只 anthropic provider）
+
+B. **OAuth Max 訂閱 + Haiku 4.5**（多 session 推薦）
+```json
+"extraction": {
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5-20251001",
+  "effort": "medium",
+  "batch": { "enabled": true, "maxTurnsPerCall": 5 }
+}
+```
+- 成本：訂閱已付，無額外
+- 限制：burst 寬鬆 5x（Haiku ≥ 5 並發），但 5h/7d window quota 仍跟對話共用；extraction 品質略低於 Sonnet
+
+C. **API Key + Sonnet 4.6**（重 batch / 多 session 推薦）
+```json
+"extraction": {
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "effort": "medium",
+  "apiKeyEnv": "ANTHROPIC_API_KEY",
+  "batch": { "enabled": true, "maxTurnsPerCall": 5 }
+}
+```
+```bash
+# 從 https://console.anthropic.com 拿 sk-ant-api03-... key
+echo "ANTHROPIC_API_KEY=sk-ant-api03-..." >> ~/.kiroku/.env
+# 移除 CLAUDE_CODE_OAUTH_TOKEN（讓 priority 落到 #3 API key 路徑）
+kiroku stop && kiroku start
+```
+- 成本（Phase 2 batch + cache 攤銷後）：
+  - 50 turn/day ≈ **$3/月**
+  - 100 turn/day ≈ **$5-8/月**
+  - 500 turn/day ≈ **$25-40/月**
+- 限制：脫離 OAuth Max 全部 quota / burst limit；按用量計費
+- 為什麼比訂閱便宜：訂閱賣的是「人類對話節奏的容量」（限速嚴），API Key 賣 token 量（worker extraction 用量真的很少）
+
+### 緩解 burst（如果一定要用 OAuth Sonnet）
+
+```json
+"worker": {
+  "throttle": { "enabled": true, "maxCallsPerMinute": 5 },
+  "extraction": {
+    "batch": { "enabled": true, "maxTurnsPerCall": 3, "flushTimeoutMs": 30000 }
+  }
+}
+```
 
 8. **Stuck `processing/` 檔案不會自動回收**
    worker crash 或被 SIGKILL 後，已 rename 進 `processing/` 的 file 仍留在那、但 `pollQueue` 只掃 `incoming/`，這些孤兒永遠不被處理。緊急救援：

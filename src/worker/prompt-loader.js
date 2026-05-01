@@ -39,6 +39,17 @@ export function getPrompt() {
   return _cachedPrompt || getBasicPrompt();
 }
 
+// Batch prompt accessor — placeholder for a future prompt-server endpoint
+// that serves slot-keyed prompts. Currently the server only ships the
+// default extraction prompt, so we return null to let the caller
+// (extractor.js) fall back to the bundled / fs-resident batch prompt.
+//
+// When the server adds a /prompt?slot=batch endpoint, fetch + cache it
+// here exactly like the default slot — no other code needs to change.
+export function getBatchPrompt() {
+  return null;
+}
+
 // Layer 2: Encrypted disk cache
 async function loadFromDisk(machineId, licenseKey) {
   if (!existsSync(PROMPT_CACHE_PATH)) return null;

@@ -30,11 +30,22 @@ function buildAnthropicSystem(promptText, isOAuth, useCacheControl = true) {
 let _systemPrompt = null;
 let _batchSystemPrompt = null;
 let _getPromptOverride = null;
+let _getBatchPromptOverride = null;
 
-// Allow prompt-loader to inject premium prompt
+// Allow prompt-loader to inject premium / remote-fetched prompt for the
+// default (single-turn) extraction slot.
 export function setPromptProvider(fn) {
   _getPromptOverride = fn;
   _systemPrompt = null; // clear cache
+}
+
+// Same hook for the batch prompt slot. Currently prompt-loader.getBatchPrompt
+// returns null (no server endpoint yet) and we fall through to fs / embedded.
+// Wire-up exists so that when the server adds a batch slot, only
+// prompt-loader.js needs to change.
+export function setBatchPromptProvider(fn) {
+  _getBatchPromptOverride = fn;
+  _batchSystemPrompt = null;
 }
 
 function getSystemPrompt() {
@@ -55,6 +66,10 @@ function getSystemPrompt() {
 }
 
 function getBatchSystemPrompt() {
+  if (_getBatchPromptOverride) {
+    const override = _getBatchPromptOverride();
+    if (override) return override;
+  }
   if (_batchSystemPrompt) return _batchSystemPrompt;
   // Dev path: prefer fs read so prompts/extraction-batch.md edits live-reload after `npm run build`.
   // Production (npm-installed) bundles do not ship prompts/, so fall back to the embedded copy.

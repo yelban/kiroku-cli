@@ -6,9 +6,9 @@ import { loadConfig } from '../shared/config.js';
 import { createLogger } from '../shared/logger.js';
 import { initDb, runMigrations, closeDb } from '../shared/db.js';
 import { jobId } from '../shared/ids.js';
-import { extract, extractBatch, setPromptProvider, BATCH_PROVIDERS } from './extractor.js';
+import { extract, extractBatch, setPromptProvider, setBatchPromptProvider, BATCH_PROVIDERS } from './extractor.js';
 import { embedTexts, initEmbedder } from './embedder.js';
-import { initPromptLoader, getPrompt, stopPromptLoader } from './prompt-loader.js';
+import { initPromptLoader, getPrompt, getBatchPrompt, stopPromptLoader } from './prompt-loader.js';
 import { setDb, storeTurn, storeEntities, storeFacts, storeEmbeddings, createExtractionJob, updateExtractionJob, runDecaySweep, runCompactionSweep } from './store.js';
 import { getLicenseState } from '../license/license-state.js';
 import { shouldSkipTurn } from './filter.js';
@@ -85,6 +85,7 @@ export async function startWorker() {
   // Initialize prompt loader (3-layer: memory → disk cache → remote)
   await initPromptLoader();
   setPromptProvider(getPrompt);
+  setBatchPromptProvider(getBatchPrompt);
   log.info('prompt loader initialized');
 
   // Pre-warm embedding model (skip if free tier with embedding disabled)

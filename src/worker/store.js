@@ -341,12 +341,17 @@ function evictIfOverLimit(d, factLimit, incoming, now) {
   }
 }
 
-export function runDecaySweep(config) {
+export async function runDecaySweep(config, opts = {}) {
   const d = _db;
   if (!d) return;
 
   const decay = config.worker?.decay;
   if (!decay?.enabled) return;
+
+  // Tunable: rows per inner transaction. Smaller chunks → shorter DB lock
+  // window per chunk + more event-loop yields, but a bit more transaction
+  // overhead. 5000 keeps each tx well under 1s on the 47k-fact dataset.
+  const chunkSize = opts.chunkSize ?? 5000;
 
   const defaultHalfLife = decay.halfLifeHours || 168;
   const halfLifeByType = decay.halfLifeByType || {};
@@ -374,32 +379,42 @@ export function runDecaySweep(config) {
   );
 
   const isoNow = new Date(now).toISOString();
-  const tx = d.transaction(() => {
-    let updated = 0;
-    let skipped = 0;
-    for (const row of rows) {
-      // Skip frozen projects
-      if (frozenProjects.has(row.project_id)) { skipped++; continue; }
+  let updated = 0;
+  let skipped = 0;
+  let chunks = 0;
 
-      // Per-type half-life; null means never decay
-      const halfLife = row.fact_type in halfLifeByType
-        ? halfLifeByType[row.fact_type]
-        : defaultHalfLife;
-      if (halfLife === null) { skipped++; continue; }
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    const tx = d.transaction(() => {
+      for (const row of chunk) {
+        // Skip frozen projects
+        if (frozenProjects.has(row.project_id)) { skipped++; continue; }
 
-      const floor = floorByType[row.fact_type] ?? 0;
-      const lastAccessed = row.last_accessed_at ? new Date(row.last_accessed_at).getTime() : now;
-      const elapsedHours = (now - lastAccessed) / 3600000;
-      const newHeat = Math.max(floor, row.base_heat * Math.pow(0.5, elapsedHours / halfLife));
-      const bucket = newHeat >= 0.7 ? 'hot' : newHeat >= 0.3 ? 'warm' : 'cold';
-      updateStmt.run(newHeat, bucket, isoNow, row.id);
-      updated++;
+        // Per-type half-life; null means never decay
+        const halfLife = row.fact_type in halfLifeByType
+          ? halfLifeByType[row.fact_type]
+          : defaultHalfLife;
+        if (halfLife === null) { skipped++; continue; }
+
+        const floor = floorByType[row.fact_type] ?? 0;
+        const lastAccessed = row.last_accessed_at ? new Date(row.last_accessed_at).getTime() : now;
+        const elapsedHours = (now - lastAccessed) / 3600000;
+        const newHeat = Math.max(floor, row.base_heat * Math.pow(0.5, elapsedHours / halfLife));
+        const bucket = newHeat >= 0.7 ? 'hot' : newHeat >= 0.3 ? 'warm' : 'cold';
+        updateStmt.run(newHeat, bucket, isoNow, row.id);
+        updated++;
+      }
+    });
+    tx();
+    chunks++;
+    // Yield event loop between chunks so MCP queries / pollQueue can run
+    // mid-sweep instead of waiting for the entire 47k-fact set to commit.
+    if (i + chunkSize < rows.length) {
+      await new Promise(setImmediate);
     }
-    return { updated, skipped };
-  });
+  }
 
-  const result = tx();
-  log.info({ ...result, frozenProjects: frozenProjects.size }, 'decay sweep complete');
+  log.info({ updated, skipped, chunks, frozenProjects: frozenProjects.size }, 'decay sweep complete');
 }
 
 function cosineSimilarity(a, b) {

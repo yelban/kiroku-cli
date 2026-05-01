@@ -74,7 +74,7 @@ describe('runDecaySweep v1.2', () => {
     seedFact(db, { id: 'f_state', projectId: 'proj1', factType: 'state', baseHeat: 1.0, lastAccessedAt: past });
     seedFact(db, { id: 'f_semantic', projectId: 'proj1', factType: 'semantic', baseHeat: 1.0, lastAccessedAt: past });
 
-    runDecaySweep(baseConfig);
+    await runDecaySweep(baseConfig);
 
     const stateHeat = db.prepare('SELECT heat FROM facts WHERE id = ?').get('f_state').heat;
     const semanticHeat = db.prepare('SELECT heat FROM facts WHERE id = ?').get('f_semantic').heat;
@@ -90,7 +90,7 @@ describe('runDecaySweep v1.2', () => {
     seedProject(db, 'proj1', new Date().toISOString());
     seedFact(db, { id: 'f_pref', projectId: 'proj1', factType: 'preference', baseHeat: 1.0, lastAccessedAt: past });
 
-    runDecaySweep(baseConfig);
+    await runDecaySweep(baseConfig);
 
     const heat = db.prepare('SELECT heat FROM facts WHERE id = ?').get('f_pref').heat;
     expect(heat).toBe(1.0); // unchanged
@@ -102,7 +102,7 @@ describe('runDecaySweep v1.2', () => {
     seedProject(db, 'proj1', new Date().toISOString());
     seedFact(db, { id: 'f_sem', projectId: 'proj1', factType: 'semantic', baseHeat: 1.0, lastAccessedAt: veryOld });
 
-    runDecaySweep(baseConfig);
+    await runDecaySweep(baseConfig);
 
     const heat = db.prepare('SELECT heat FROM facts WHERE id = ?').get('f_sem').heat;
     expect(heat).toBeCloseTo(0.3, 1); // floor for semantic
@@ -115,7 +115,7 @@ describe('runDecaySweep v1.2', () => {
     seedProject(db, 'frozen_proj', oldDate);
     seedFact(db, { id: 'f_frozen', projectId: 'frozen_proj', factType: 'state', baseHeat: 0.8, lastAccessedAt: past });
 
-    runDecaySweep(baseConfig);
+    await runDecaySweep(baseConfig);
 
     const heat = db.prepare('SELECT heat FROM facts WHERE id = ?').get('f_frozen').heat;
     expect(heat).toBe(0.8); // unchanged — project is frozen
@@ -127,7 +127,7 @@ describe('runDecaySweep v1.2', () => {
     seedProject(db, 'proj1', new Date().toISOString());
     seedFact(db, { id: 'f_custom', projectId: 'proj1', factType: 'custom_type', baseHeat: 1.0, lastAccessedAt: past });
 
-    runDecaySweep(baseConfig);
+    await runDecaySweep(baseConfig);
 
     const heat = db.prepare('SELECT heat FROM facts WHERE id = ?').get('f_custom').heat;
     // default 168h half-life, 168h elapsed → 0.5
@@ -146,7 +146,7 @@ describe('runDecaySweep v1.2', () => {
     const coldPast = new Date(Date.now() - 500 * 3600000).toISOString();
     seedFact(db, { id: 'f_cold', projectId: 'proj1', factType: 'state', baseHeat: 0.3, lastAccessedAt: coldPast });
 
-    runDecaySweep(baseConfig);
+    await runDecaySweep(baseConfig);
 
     expect(db.prepare('SELECT decay_bucket FROM facts WHERE id = ?').get('f_hot').decay_bucket).toBe('hot');
     expect(db.prepare('SELECT decay_bucket FROM facts WHERE id = ?').get('f_cold').decay_bucket).toBe('cold');
@@ -158,7 +158,7 @@ describe('runDecaySweep v1.2', () => {
     seedProject(db, 'proj1', new Date().toISOString());
     seedFact(db, { id: 'f1', projectId: 'proj1', factType: 'state', baseHeat: 1.0, lastAccessedAt: past });
 
-    runDecaySweep({ worker: { decay: { enabled: false } } });
+    await runDecaySweep({ worker: { decay: { enabled: false } } });
 
     const heat = db.prepare('SELECT heat FROM facts WHERE id = ?').get('f1').heat;
     expect(heat).toBe(1.0); // unchanged
@@ -172,7 +172,7 @@ describe('runDecaySweep v1.2', () => {
     seedFact(db, { id: 'f_old', projectId: 'old_proj', factType: 'state', baseHeat: 1.0, lastAccessedAt: past });
 
     const noFreezeConfig = { ...baseConfig, worker: { ...baseConfig.worker, decay: { ...baseConfig.worker.decay, freezeAfterInactiveDays: 0 } } };
-    runDecaySweep(noFreezeConfig);
+    await runDecaySweep(noFreezeConfig);
 
     const heat = db.prepare('SELECT heat FROM facts WHERE id = ?').get('f_old').heat;
     expect(heat).toBeLessThan(1.0); // should decay, not frozen

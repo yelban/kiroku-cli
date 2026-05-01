@@ -107,7 +107,7 @@ export async function startWorker() {
   // concurrently. Decay sweep is fast enough to stay synchronous.
   if (config.worker.decay.enabled) {
     const runSweeps = async () => {
-      try { runDecaySweep(config); } catch (err) { log.warn({ err: err.message }, 'decay sweep failed'); }
+      try { await runDecaySweep(config); } catch (err) { log.warn({ err: err.message }, 'decay sweep failed'); }
       try { await runCompactionSweep(db); } catch (err) { log.warn({ err: err.message }, 'compaction sweep failed'); }
     };
     // Defer initial sweep to next tick so worker starts polling immediately.

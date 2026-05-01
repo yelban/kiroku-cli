@@ -84,7 +84,7 @@ function getBatchSystemPrompt() {
 
 // Providers supported by the batch streaming pipeline. Caller (worker.js)
 // uses the same set to decide whether processFile routes through bufferEvent.
-export const BATCH_PROVIDERS = new Set(['anthropic', 'openrouter', 'openai-compatible']);
+export const BATCH_PROVIDERS = new Set(['anthropic', 'openrouter', 'openai-compatible', 'gemini']);
 
 export async function extractBatch(turns, extractionConfig) {
   const provider = extractionConfig.provider;
@@ -99,6 +99,12 @@ export async function extractBatch(turns, extractionConfig) {
       ? 'https://openrouter.ai/api/v1'
       : (extractionConfig.baseUrl || 'https://api.openai.com/v1');
     return await extractBatchOpenAICompatible(turns, extractionConfig, apiKey, baseUrl);
+  }
+  if (provider === 'gemini') {
+    const apiKey = process.env[extractionConfig.apiKeyEnv || 'GEMINI_API_KEY']
+      || process.env.GEMINI_API_KEY;
+    if (!apiKey) throw new Error('extractBatch gemini: missing GEMINI_API_KEY in env');
+    return await extractBatchGemini(turns, extractionConfig, apiKey);
   }
   throw new Error(`extractBatch does not support provider: ${provider}`);
 }
@@ -284,6 +290,84 @@ async function extractBatchOpenAICompatible(turns, config, apiKey, baseUrl) {
   // (x-ratelimit-* on OpenAI, openrouter-specific headers on OR), but
   // the format isn't unified, so we skip the parseRatelimit step.
   void httpResult;
+  return result;
+}
+
+// Gemini direct (Google AI Studio) batch streaming. SSE shape from
+//   POST /v1beta/models/{model}:streamGenerateContent?alt=sse
+// is one JSON envelope per `data:` line, content stored as:
+//   { candidates: [{ content: { parts: [{ text: "..." }] } }],
+//     usageMetadata: { promptTokenCount, candidatesTokenCount, ... } }
+//
+// We accumulate every parts[*].text fragment via BatchStreamParser.feedRaw,
+// reusing the same ===TURN_N_END=== delimiter logic. usageMetadata
+// arrives on the final chunk of the stream.
+async function extractBatchGemini(turns, config, apiKey) {
+  const userMessage = turns.map((t, idx) =>
+    `===TURN_${idx}===\n${t.text}\n===TURN_${idx}_END_INPUT===`
+  ).join('\n\n');
+
+  const requestBody = {
+    contents: [{ role: 'user', parts: [{ text: userMessage }] }],
+    systemInstruction: { parts: [{ text: getBatchSystemPrompt() }] },
+    generationConfig: {
+      temperature: config.temperature ?? 0,
+      maxOutputTokens: config.maxOutputTokens || 8000,
+    },
+  };
+  const body = JSON.stringify(requestBody);
+  const model = config.model || 'gemini-2.0-flash';
+
+  const parser = createBatchStreamParser();
+  const decoder = new TextDecoder();
+  let sseBuffer = '';
+  let usage = null;
+
+  await httpRequestStreaming({
+    hostname: 'generativelanguage.googleapis.com',
+    port: 443,
+    path: `/v1beta/models/${model}:streamGenerateContent?key=${apiKey}&alt=sse`,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+      'Content-Length': Buffer.byteLength(body),
+    },
+    protocol: 'https',
+    onData: chunk => {
+      sseBuffer += decoder.decode(chunk, { stream: true });
+      const lines = sseBuffer.split('\n');
+      sseBuffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (!data) continue;
+        try {
+          const parsed = JSON.parse(data);
+          const parts = parsed.candidates?.[0]?.content?.parts;
+          if (parts) {
+            for (const p of parts) {
+              if (p.text) parser.feedRaw(p.text);
+            }
+          }
+          if (parsed.usageMetadata) usage = parsed.usageMetadata;
+        } catch { /* skip malformed */ }
+      }
+    },
+  }, body);
+
+  const result = parser.finalize();
+  log.info({
+    input: usage?.promptTokenCount || 0,
+    output: usage?.candidatesTokenCount || 0,
+    total: usage?.totalTokenCount || 0,
+    requested: turns.length,
+    completed: result.completedTurns.length,
+    errors: result.errors.length,
+    stop: result.stopReason,
+    provider: 'gemini',
+  }, 'batch extraction usage');
+
   return result;
 }
 

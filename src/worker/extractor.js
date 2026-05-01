@@ -7,6 +7,7 @@ import { createLogger } from '../shared/logger.js';
 import { resolveAnthropicAuth, buildAuthHeaders, reconcileOauthToken } from './anthropic-auth.js';
 import { createBatchStreamParser } from './batch-parser.js';
 import { recordUsage as recordCacheUsage, shouldUseCacheControl, getCacheHealth } from './cache-health.js';
+import { parseRatelimit, deriveRetryAfterMs } from './ratelimit.js';
 import EMBEDDED_BATCH_PROMPT from '../../prompts/extraction-batch.md';
 
 const log = createLogger('extractor');
@@ -134,7 +135,7 @@ async function extractBatchAnthropicOnce(turns, config) {
   const authHeaders = buildAuthHeaders(auth);
   const parser = createBatchStreamParser();
 
-  await httpRequestStreaming({
+  const httpResult = await httpRequestStreaming({
     hostname: url.hostname,
     port: parseInt(url.port) || (url.protocol === 'https:' ? 443 : 80),
     path: (url.pathname.includes('/v1') ? url.pathname.replace(/\/$/, '') : url.pathname.replace(/\/$/, '') + '/v1') + '/messages',
@@ -153,6 +154,7 @@ async function extractBatchAnthropicOnce(turns, config) {
   const u = result.usage || {};
   recordCacheUsage(model, u);
   const health = getCacheHealth(model);
+  const ratelimit = parseRatelimit(httpResult?.headers);
   log.info({
     cache_creation: u.cache_creation_input_tokens || 0,
     cache_read: u.cache_read_input_tokens || 0,
@@ -164,6 +166,7 @@ async function extractBatchAnthropicOnce(turns, config) {
     errors: result.errors.length,
     cache_status: health?.status,
     cache_disabled: !useCache,
+    ratelimit,
   }, 'batch extraction usage');
   if (health?.status === 'broken' && useCache) {
     log.warn({ model, creations: health.creations, reads: health.reads }, 'prompt cache appears broken on this model — disabling cache_control for subsequent calls (24h cooldown)');
@@ -287,7 +290,7 @@ async function callAnthropicOnce(text, config) {
 
   const url = new URL(auth.baseUrl);
   const authHeaders = buildAuthHeaders(auth);
-  const data = await httpRequest({
+  const { data, headers: respHeaders } = await httpRequest({
     hostname: url.hostname,
     port: parseInt(url.port) || (url.protocol === 'https:' ? 443 : 80),
     path: (url.pathname.includes('/v1') ? url.pathname.replace(/\/$/, '') : url.pathname.replace(/\/$/, '') + '/v1') + '/messages',
@@ -298,13 +301,15 @@ async function callAnthropicOnce(text, config) {
       'Content-Length': Buffer.byteLength(body),
     },
     protocol: url.protocol.replace(':', ''),
+    withHeaders: true,
   }, body);
 
   const response = JSON.parse(data);
   const u = response.usage || {};
   recordCacheUsage(model, u);
   const health = getCacheHealth(model);
-  if (useCache || u.cache_creation_input_tokens || u.cache_read_input_tokens) {
+  const ratelimit = parseRatelimit(respHeaders);
+  if (useCache || u.cache_creation_input_tokens || u.cache_read_input_tokens || ratelimit) {
     log.info({
       cache_creation: u.cache_creation_input_tokens || 0,
       cache_read: u.cache_read_input_tokens || 0,
@@ -312,6 +317,7 @@ async function callAnthropicOnce(text, config) {
       output: u.output_tokens || 0,
       cache_status: health?.status,
       cache_disabled: !useCache,
+      ratelimit,
     }, 'extraction usage');
   }
   if (health?.status === 'broken' && useCache) {
@@ -386,17 +392,25 @@ function parseExtractionResult(content) {
 function httpRequest(options, body) {
   return new Promise((resolve, reject) => {
     const mod = options.protocol === 'https' ? https : http;
-    delete options.protocol;
-    const req = mod.request(options, res => {
+    const opts = { ...options };
+    delete opts.protocol;
+    const wantHeaders = !!opts.withHeaders;
+    delete opts.withHeaders;
+    const req = mod.request(opts, res => {
       const chunks = [];
       res.on('data', chunk => chunks.push(chunk));
       res.on('end', () => {
         const data = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode >= 400) {
-          reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
-        } else {
-          resolve(data);
+          const err = new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`);
+          err.statusCode = res.statusCode;
+          err.headers = res.headers;
+          err.retryAfterMs = deriveRetryAfterMs(res.headers);
+          reject(err);
+          return;
         }
+        if (wantHeaders) resolve({ data, headers: res.headers, statusCode: res.statusCode });
+        else resolve(data);
       });
     });
     req.on('error', reject);
@@ -423,7 +437,11 @@ function httpRequestStreaming(options, body) {
         res.on('data', c => chunks.push(c));
         res.on('end', () => {
           const data = Buffer.concat(chunks).toString('utf8');
-          reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
+          const err = new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`);
+          err.statusCode = res.statusCode;
+          err.headers = res.headers;
+          err.retryAfterMs = deriveRetryAfterMs(res.headers);
+          reject(err);
         });
         res.on('error', reject);
         return;
@@ -432,7 +450,7 @@ function httpRequestStreaming(options, body) {
         try { onData(chunk); }
         catch (err) { req.destroy(err); }
       });
-      res.on('end', () => resolve());
+      res.on('end', () => resolve({ headers: res.headers, statusCode: res.statusCode }));
       res.on('error', reject);
     });
     req.on('error', reject);

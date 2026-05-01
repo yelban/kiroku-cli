@@ -314,11 +314,18 @@ async function extractWithRetry(text, config) {
     } catch (err) {
       lastErr = err;
       if (attempt < maxAttempts) {
-        const delay = Math.min(
+        // Prefer server-supplied retry-after / ratelimit reset over exponential.
+        const exponential = Math.min(
           config.worker.retry.baseDelayMs * Math.pow(2, attempt - 1),
           config.worker.retry.maxDelayMs,
         );
-        log.warn({ attempt, delay, err: err.message }, 'extraction retry');
+        const delay = err?.retryAfterMs || exponential;
+        const ratelimitDriven = !!err?.retryAfterMs;
+        log.warn({
+          attempt, delay, err: err.message,
+          statusCode: err?.statusCode,
+          ratelimitDriven,
+        }, 'extraction retry');
         await new Promise(r => setTimeout(r, delay));
       }
     }
@@ -502,12 +509,22 @@ function retryItem(item, config, err) {
   try { renameSync(item.processingPath, join(QUEUE_INCOMING, item.filename)); }
   catch (e) { log.warn({ filename: item.filename, err: e.message }, 'failed to requeue batch item'); }
 
-  const delay = Math.min(
+  // Prefer server-supplied retry-after / ratelimit reset over exponential.
+  const exponential = Math.min(
     config.worker.retry.baseDelayMs * Math.pow(2, attempt - 1),
     config.worker.retry.maxDelayMs,
   );
+  const delay = err?.retryAfterMs || exponential;
+  const ratelimitDriven = !!err?.retryAfterMs;
   _retryAttempts.set(item.filename, { count: attempt, nextAttemptAfter: Date.now() + delay });
-  log.info({ jid: item.jid, filename: item.filename, attempt, delay }, 'batch item scheduled retry');
+  log.info({
+    jid: item.jid,
+    filename: item.filename,
+    attempt,
+    delay,
+    statusCode: err?.statusCode,
+    ratelimitDriven,
+  }, 'batch item scheduled retry');
 }
 
 function rescueBatchBuffer() {

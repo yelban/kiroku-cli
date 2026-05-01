@@ -5,7 +5,13 @@ const VALIDATE_CACHE_TTL = 5 * 60; // 5 minutes (seconds)
 const EXPECTED_STORE_ID = 309745;
 const EXPECTED_PRODUCT_ID = 876026;
 
-// GET /prompt — validate license via LS, return premium prompt
+// Slot router: ?slot=<name> picks which prompt to serve. Defaults to
+// 'default' for backward compatibility with pre-1.7.16 clients.
+const VALID_SLOTS = new Set(['default', 'batch']);
+const LEGACY_KEY = 'prompt:latest';
+const slotKey = (slot) => `prompt:${slot}`;
+
+// GET /prompt[?slot=default|batch] — validate license, return prompt for slot
 export async function handlePromptGet(request, env) {
   const auth = request.headers.get('Authorization');
   if (!auth?.startsWith('Bearer ')) {
@@ -19,10 +25,21 @@ export async function handlePromptGet(request, env) {
     return json({ error: 'Invalid or expired license' }, 403);
   }
 
-  // Get prompt from KV
-  const promptData = await env.KV.get('prompt:latest', { type: 'json' });
+  const url = new URL(request.url);
+  const slot = url.searchParams.get('slot') || 'default';
+  if (!VALID_SLOTS.has(slot)) {
+    return json({ error: `Invalid slot: ${slot}` }, 400);
+  }
+
+  // Read slot-keyed entry first; for default, fall back to the legacy
+  // `prompt:latest` key so existing KV data keeps working until a new
+  // /prompt/update arrives.
+  let promptData = await env.KV.get(slotKey(slot), { type: 'json' });
+  if (!promptData && slot === 'default') {
+    promptData = await env.KV.get(LEGACY_KEY, { type: 'json' });
+  }
   if (!promptData) {
-    return json({ error: 'No prompt available' }, 404);
+    return json({ error: `No prompt available for slot: ${slot}` }, 404);
   }
 
   // ETag check
@@ -34,20 +51,28 @@ export async function handlePromptGet(request, env) {
   return new Response(JSON.stringify({
     content: promptData.content,
     version: promptData.version,
+    slot,
   }), {
     headers: {
       'Content-Type': 'application/json',
       'ETag': `"${promptData.etag}"`,
+      'X-Prompt-Slot': slot,
       'Cache-Control': 'private, no-cache',
     },
   });
 }
 
-// POST /prompt/update — admin endpoint to update prompt content
+// POST /prompt/update[?slot=default|batch] — admin endpoint to update prompt content for slot
 export async function handlePromptUpdate(request, env) {
   const adminKey = request.headers.get('Authorization');
   if (adminKey !== `Bearer ${env.PROMPT_ADMIN_KEY}`) {
     return json({ error: 'Unauthorized' }, 401);
+  }
+
+  const url = new URL(request.url);
+  const slot = url.searchParams.get('slot') || 'default';
+  if (!VALID_SLOTS.has(slot)) {
+    return json({ error: `Invalid slot: ${slot}` }, 400);
   }
 
   const { content, version } = await request.json();
@@ -60,11 +85,17 @@ export async function handlePromptUpdate(request, env) {
     content,
     version,
     etag,
+    slot,
     updatedAt: new Date().toISOString(),
   };
 
-  await env.KV.put('prompt:latest', JSON.stringify(promptData));
-  return json({ ok: true, version, etag });
+  await env.KV.put(slotKey(slot), JSON.stringify(promptData));
+  // Mirror default writes to the legacy key so a rolled-back server can
+  // still serve the old `prompt:latest` route without a re-deploy.
+  if (slot === 'default') {
+    await env.KV.put(LEGACY_KEY, JSON.stringify(promptData));
+  }
+  return json({ ok: true, slot, version, etag });
 }
 
 // Validate license key via Lemon Squeezy API (with short cache)

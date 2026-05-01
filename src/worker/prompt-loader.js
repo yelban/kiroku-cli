@@ -1,6 +1,6 @@
 import https from 'node:https';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { KIROKU_ROOT, PROMPT_CACHE_PATH, PROMPT_CACHE_DIR, LICENSE_KEY_PATH } from '../shared/paths.js';
 import { getMachineId } from '../license/machine-id.js';
 import { deriveKey, encrypt, decrypt } from './prompt-crypto.js';
@@ -11,17 +11,28 @@ const log = createLogger('prompt-loader');
 const PROMPT_API_URL = 'https://kiroku-api.twampd.workers.dev/prompt';
 const REFRESH_INTERVAL = 24 * 60 * 60 * 1000; // 24h
 
-let _cachedPrompt = null;
-let _cachedEtag = null;
+// Slot table — each slot keeps its own memory cache + etag and points
+// to its own encrypted disk cache file. The 'default' slot's disk cache
+// stays at PROMPT_CACHE_PATH for backward compat with pre-1.7.16 caches.
+const SLOTS = ['default', 'batch'];
+const _state = {
+  default: { content: null, etag: null },
+  batch: { content: null, etag: null },
+};
+
 let _refreshTimer = null;
 
-// Embedded basic prompt (free tier fallback)
+function diskPathFor(slot) {
+  if (slot === 'default') return PROMPT_CACHE_PATH;
+  return join(PROMPT_CACHE_DIR, `prompt-${slot}.enc`);
+}
+
+// Embedded basic prompt (free tier fallback for the default slot)
 function getBasicPrompt() {
   const basicPath = join(KIROKU_ROOT, 'prompts', 'extraction-basic.md');
   if (existsSync(basicPath)) {
     return readFileSync(basicPath, 'utf8');
   }
-  // Absolute fallback if file missing
   return 'You are a knowledge extraction engine. Extract entities and facts as JSON. Respond with ONLY JSON.';
 }
 
@@ -34,62 +45,52 @@ function getLicenseKey() {
   }
 }
 
-// Layer 1: Memory cache
+// Layer 1: Memory cache, default slot
 export function getPrompt() {
-  return _cachedPrompt || getBasicPrompt();
+  return _state.default.content || getBasicPrompt();
 }
 
-// Batch prompt accessor — placeholder for a future prompt-server endpoint
-// that serves slot-keyed prompts. Currently the server only ships the
-// default extraction prompt, so we return null to let the caller
-// (extractor.js) fall back to the bundled / fs-resident batch prompt.
-//
-// When the server adds a /prompt?slot=batch endpoint, fetch + cache it
-// here exactly like the default slot — no other code needs to change.
+// Layer 1: Memory cache, batch slot. Returns null if the server hasn't
+// pushed a batch prompt for this license yet — extractor.js will fall
+// back to the bundled / fs-resident copy.
 export function getBatchPrompt() {
-  return null;
+  return _state.batch.content;
 }
 
-// Layer 2: Encrypted disk cache
-async function loadFromDisk(machineId, licenseKey) {
-  if (!existsSync(PROMPT_CACHE_PATH)) return null;
+// Layer 2: Encrypted disk cache (per slot)
+async function loadSlotFromDisk(slot, machineId, licenseKey) {
+  const path = diskPathFor(slot);
+  if (!existsSync(path)) return null;
   try {
     const key = await deriveKey(machineId, licenseKey);
-    const data = readFileSync(PROMPT_CACHE_PATH);
+    const data = readFileSync(path);
     const json = decrypt(key, data);
-    const { version, content, etag } = JSON.parse(json);
-    _cachedEtag = etag || null;
-    log.info({ version }, 'loaded prompt from disk cache');
-    return content;
+    const parsed = JSON.parse(json);
+    _state[slot].etag = parsed.etag || null;
+    log.info({ slot, version: parsed.version }, 'loaded prompt from disk cache');
+    return parsed.content;
   } catch (err) {
-    log.warn({ err: err.message }, 'failed to load prompt cache');
+    log.warn({ slot, err: err.message }, 'failed to load prompt cache');
     return null;
   }
 }
 
-// Layer 3: Remote fetch
-async function fetchFromRemote(licenseKey, etag) {
+// Layer 3: Remote fetch (per slot, ?slot=<slot> query param)
+async function fetchSlotFromRemote(slot, licenseKey, etag) {
   return new Promise((resolve, reject) => {
     const url = new URL(PROMPT_API_URL);
-    const headers = {
-      'Authorization': `Bearer ${licenseKey}`,
-    };
+    if (slot && slot !== 'default') url.searchParams.set('slot', slot);
+    const headers = { 'Authorization': `Bearer ${licenseKey}` };
     if (etag) headers['If-None-Match'] = etag;
 
     const req = https.get(url, { headers }, (res) => {
-      if (res.statusCode === 304) {
-        resolve({ notModified: true });
-        return;
-      }
-      if (res.statusCode === 403) {
-        resolve({ forbidden: true });
-        return;
-      }
+      if (res.statusCode === 304) { resolve({ notModified: true }); return; }
+      if (res.statusCode === 403) { resolve({ forbidden: true }); return; }
+      if (res.statusCode === 404) { resolve({ notAvailable: true }); return; }
       if (res.statusCode !== 200) {
         reject(new Error(`HTTP ${res.statusCode}`));
         return;
       }
-
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => {
@@ -107,78 +108,82 @@ async function fetchFromRemote(licenseKey, etag) {
   });
 }
 
-// Save to encrypted disk cache
-async function saveToDisk(machineId, licenseKey, content, version, etag) {
+async function saveSlotToDisk(slot, machineId, licenseKey, content, version, etag) {
   try {
     const key = await deriveKey(machineId, licenseKey);
-    const json = JSON.stringify({ version, content, etag });
+    const json = JSON.stringify({ version, content, etag, slot });
     const encrypted = encrypt(key, json);
     mkdirSync(PROMPT_CACHE_DIR, { recursive: true });
-    writeFileSync(PROMPT_CACHE_PATH, encrypted);
-    log.info({ version }, 'saved prompt to disk cache');
+    writeFileSync(diskPathFor(slot), encrypted);
+    log.info({ slot, version }, 'saved prompt to disk cache');
   } catch (err) {
-    log.warn({ err: err.message }, 'failed to save prompt cache');
+    log.warn({ slot, err: err.message }, 'failed to save prompt cache');
   }
 }
 
-// 3-layer fallback init
+async function loadOneSlot(slot, machineId, licenseKey) {
+  // Try disk cache first
+  const disk = await loadSlotFromDisk(slot, machineId, licenseKey);
+  if (disk) _state[slot].content = disk;
+
+  // Then try remote (best-effort)
+  try {
+    const result = await fetchSlotFromRemote(slot, licenseKey, _state[slot].etag);
+    if (result.notModified) {
+      log.info({ slot }, 'prompt not modified (304)');
+    } else if (result.forbidden) {
+      log.warn({ slot }, 'license rejected by prompt server (403)');
+    } else if (result.notAvailable) {
+      log.info({ slot }, 'prompt slot not available on server (404), using local fallback');
+    } else if (result.content) {
+      _state[slot].content = result.content;
+      _state[slot].etag = result.etag;
+      await saveSlotToDisk(slot, machineId, licenseKey, result.content, result.version, result.etag);
+    }
+  } catch (err) {
+    log.warn({ slot, err: err.message }, 'failed to fetch remote prompt');
+  }
+}
+
+// 3-layer fallback init across both slots
 export async function initPromptLoader() {
   const licenseKey = getLicenseKey();
 
-  // No license → free tier basic prompt
+  // No license → free tier basic prompt for default; batch slot stays
+  // null and the extractor falls back to its embedded copy.
   if (!licenseKey) {
-    _cachedPrompt = getBasicPrompt();
-    log.info('no license, using basic prompt');
-    return _cachedPrompt;
+    _state.default.content = getBasicPrompt();
+    log.info('no license, using basic prompt for default slot');
+    return _state.default.content;
   }
 
   const machineId = await getMachineId();
-
-  // Try disk cache first
-  const diskPrompt = await loadFromDisk(machineId, licenseKey);
-  if (diskPrompt) {
-    _cachedPrompt = diskPrompt;
+  for (const slot of SLOTS) {
+    await loadOneSlot(slot, machineId, licenseKey);
   }
 
-  // Try remote (non-blocking if disk hit)
-  try {
-    const result = await fetchFromRemote(licenseKey, _cachedEtag);
+  // Default slot must always have something
+  if (!_state.default.content) _state.default.content = getBasicPrompt();
 
-    if (result.notModified) {
-      log.info('prompt not modified (304)');
-    } else if (result.forbidden) {
-      log.warn('license rejected by prompt server (403)');
-      if (!_cachedPrompt) _cachedPrompt = getBasicPrompt();
-    } else if (result.content) {
-      _cachedPrompt = result.content;
-      _cachedEtag = result.etag;
-      await saveToDisk(machineId, licenseKey, result.content, result.version, result.etag);
-    }
-  } catch (err) {
-    log.warn({ err: err.message }, 'failed to fetch remote prompt');
-    // Fallback: disk cache or basic
-    if (!_cachedPrompt) _cachedPrompt = getBasicPrompt();
-  }
-
-  if (!_cachedPrompt) _cachedPrompt = getBasicPrompt();
-
-  // Schedule background refresh
-  _refreshTimer = setInterval(() => refreshPrompt(machineId, licenseKey), REFRESH_INTERVAL);
+  // Schedule background refresh of every slot
+  _refreshTimer = setInterval(() => refreshAllSlots(machineId, licenseKey), REFRESH_INTERVAL);
   if (_refreshTimer.unref) _refreshTimer.unref();
 
-  return _cachedPrompt;
+  return _state.default.content;
 }
 
-async function refreshPrompt(machineId, licenseKey) {
-  try {
-    const result = await fetchFromRemote(licenseKey, _cachedEtag);
-    if (result.content) {
-      _cachedPrompt = result.content;
-      _cachedEtag = result.etag;
-      await saveToDisk(machineId, licenseKey, result.content, result.version, result.etag);
+async function refreshAllSlots(machineId, licenseKey) {
+  for (const slot of SLOTS) {
+    try {
+      const result = await fetchSlotFromRemote(slot, licenseKey, _state[slot].etag);
+      if (result.content) {
+        _state[slot].content = result.content;
+        _state[slot].etag = result.etag;
+        await saveSlotToDisk(slot, machineId, licenseKey, result.content, result.version, result.etag);
+      }
+    } catch (err) {
+      log.debug({ slot, err: err.message }, 'background prompt refresh failed');
     }
-  } catch (err) {
-    log.debug({ err: err.message }, 'background prompt refresh failed');
   }
 }
 

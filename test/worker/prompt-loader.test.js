@@ -72,13 +72,13 @@ describe('prompt-loader', () => {
     it('uses 3-layer fallback (memory, disk, remote)', () => {
       const loaderPath = join(ROOT, 'src', 'worker', 'prompt-loader.js');
       const source = readFileSync(loaderPath, 'utf8');
-      // Memory cache
-      expect(source).toContain('_cachedPrompt');
+      // Memory cache (1.7.16+ keyed per slot via _state)
+      expect(source).toMatch(/_state\b|_cachedPrompt/);
       // Disk cache
       expect(source).toContain('PROMPT_CACHE_PATH');
-      expect(source).toContain('loadFromDisk');
+      expect(source).toMatch(/loadFromDisk|loadSlotFromDisk/);
       // Remote fetch
-      expect(source).toContain('fetchFromRemote');
+      expect(source).toMatch(/fetchFromRemote|fetchSlotFromRemote/);
       expect(source).toContain('kiroku-api');
     });
 

@@ -622,3 +622,4 @@ kiroku stop && kiroku start   # 套用
 | `7febc4c` | 1.7.12 | Feat — `kiroku dead-letter` list/retry/clear subcommand |
 | `5c614cc` | 1.7.13 | Feat — `kiroku status` shows mode + cache + ratelimit utilization |
 | `eea1fc3` | 1.7.14 | Feat — adaptive throttle (auto-throttle when ratelimit utilization > 80% / > 95%) |
+| `66035cf` | 1.7.15 | Fix — chunked decay sweep (5000-row tx, yield between chunks) |

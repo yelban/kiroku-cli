@@ -2,7 +2,7 @@
 
 import { spawn, execSync } from 'node:child_process';
 import http from 'node:http';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, chmodSync, mkdirSync, statSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, chmodSync, mkdirSync, statSync, renameSync, openSync, readSync, closeSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -478,6 +478,40 @@ async function cmdStop() {
   try { unlinkSync(sessFile); } catch {}
 }
 
+// Read last `bytes` bytes of a file (default 64KB) to grep recent log lines
+// without loading the whole file. Returns '' if file missing.
+function tailFileBytes(path, bytes = 64 * 1024) {
+  try {
+    const stat = statSync(path);
+    const start = Math.max(0, stat.size - bytes);
+    const len = stat.size - start;
+    if (len === 0) return '';
+    const fd = openSync(path, 'r');
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, start);
+    closeSync(fd);
+    return buf.toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+// Find the most recent extraction usage log entry. Returns the parsed
+// pino JSON object or null. Used by cmdStatus to surface cache_status
+// and ratelimit utilization without depending on worker IPC.
+function findLatestExtractionUsage(p) {
+  const text = tailFileBytes(join(p.LOG_DIR, 'extractor.log'));
+  if (!text) return null;
+  const lines = text.split('\n').filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const d = JSON.parse(lines[i]);
+      if (d.msg === 'batch extraction usage' || d.msg === 'extraction usage') return d;
+    } catch { /* skip non-JSON */ }
+  }
+  return null;
+}
+
 async function cmdStatus() {
   const p = await paths();
 
@@ -489,7 +523,7 @@ async function cmdStatus() {
     console.log('Proxy:  STOPPED');
   }
 
-  // Worker status
+  // Worker status + mode summary
   const workerState = getWorkerState(p);
   if (workerState && isProcessAlive(workerState.pid)) {
     console.log(`Worker: RUNNING (PID ${workerState.pid})`);
@@ -514,7 +548,21 @@ async function cmdStatus() {
     console.log('MCP:    NOT CONFIGURED');
   }
 
-  // System health
+  // Worker mode (from config.json)
+  if (existsSync(p.CONFIG_PATH)) {
+    try {
+      const cfg = JSON.parse(readFileSync(p.CONFIG_PATH, 'utf8'));
+      const ext = cfg.worker?.extraction || {};
+      console.log(`\nMode:   ${detectMode(ext)}`);
+      console.log(`  provider: ${ext.provider || '(default)'}`);
+      console.log(`  model:    ${ext.model || '(default)'}`);
+      const batchOn = ext.batch?.enabled;
+      console.log(`  batch:    ${batchOn ? `on (${ext.batch.maxTurnsPerCall || 10} turns/call)` : 'off'}`);
+      console.log(`  cache:    ${ext.provider === 'anthropic' && batchOn ? 'enabled (Anthropic ephemeral)' : 'n/a'}`);
+    } catch { /* ignore parse errors */ }
+  }
+
+  // System health (DB + queue)
   const { loadConfig } = await config();
   const { getSystemHealth } = await import('../src/shared/health.js');
   const health = await getSystemHealth(loadConfig());
@@ -528,6 +576,36 @@ async function cmdStatus() {
 
   const q = health.components.queue;
   console.log(`Queue:  ${q.incoming} incoming, ${q.processing} processing, ${q.dead_letter} dead-letter`);
+
+  // Latest extraction snapshot (cache + ratelimit)
+  const usage = findLatestExtractionUsage(p);
+  if (usage) {
+    const ts = new Date(usage.time).toISOString().slice(0, 19).replace('T', ' ');
+    const ageMin = Math.floor((Date.now() - usage.time) / 60000);
+    console.log(`\nLast extraction: ${ts} (${ageMin}m ago)`);
+    if (usage.cache_status) {
+      console.log(`  cache_status: ${usage.cache_status}${usage.cache_disabled ? ' (cache_control disabled)' : ''}`);
+    }
+    if (typeof usage.cache_read === 'number' && usage.cache_read > 0) {
+      console.log(`  cache_read:   ${usage.cache_read} tokens`);
+    }
+    if (typeof usage.input === 'number' || typeof usage.output === 'number') {
+      console.log(`  tokens:       input=${usage.input || 0} output=${usage.output || 0}`);
+    }
+    const rl = usage.ratelimit;
+    if (rl) {
+      console.log(`  ratelimit:`);
+      if (rl.fivehUtil != null) console.log(`    5h util:        ${(rl.fivehUtil * 100).toFixed(0)}%`);
+      if (rl.sevenDUtil != null) console.log(`    7d util:        ${(rl.sevenDUtil * 100).toFixed(0)}%`);
+      if (rl.sevenDSonnetUtil != null) console.log(`    7d_sonnet util: ${(rl.sevenDSonnetUtil * 100).toFixed(0)}%`);
+      if (rl.fivehReset) {
+        const resetTs = new Date(rl.fivehReset * 1000).toISOString().slice(0, 19).replace('T', ' ');
+        const inMin = Math.max(0, Math.floor((rl.fivehReset * 1000 - Date.now()) / 60000));
+        console.log(`    5h reset:       ${resetTs} (in ${inMin}m)`);
+      }
+      if (rl.claim) console.log(`    claim:          ${rl.claim}`);
+    }
+  }
 }
 
 async function cmdDoctor() {

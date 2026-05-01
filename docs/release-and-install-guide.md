@@ -226,6 +226,49 @@ API Key 反而便宜是因為 worker extraction 真實用量很少（每天可�
 
 **重要：`extractBatch` + prompt caching 只 anthropic provider 支援。** 其他 provider 走 `extract()` 單筆 path（filter / throttle / effort 仍生效，但無法享受 ~70% input token 攤銷）。所以 batch+cache 攤銷後的 Haiku 4.5 ($3/月) 很接近單筆的 GPT-5.4 Nano ($1.5/月) 但有 batch 容錯加成。
 
+### 抽取品質 A/B 實測（2026-05，OAuth Max Pro）
+
+5 個代表性 turn × 2 model（Haiku 4.5 vs Sonnet 4.6），sequential 同 system prompt（`prompts/extraction.md`）。完整 dump：[`/tmp/extraction-ab-result.md`](https://github.com/yelban/kiroku-cli)（tip：本機重跑：`python3 /tmp/extraction-ab.py`）。
+
+#### Summary
+
+| Model | Parse OK | Total ent | Total facts | Total in | Cache read | Total out | Avg latency |
+|---|---|---|---|---|---|---|---|
+| Haiku 4.5 | 5/5 | 10 | 8 | 17,333 | **0**（無效） | 1,084 | 1.8s |
+| Sonnet 4.6 | 5/5 | 11 | 8 | 303 | **13,628**（4/5 hit） | 647 | 3.6s |
+
+#### 兩個重要發現
+
+1. **品質相當**：兩家 5/5 parse OK，無 hallucination、無 schema drift。Sonnet 偶爾 over-extract（多抓一個沒必要的 concept entity，如 turn 3 的 "token refresh"）；Haiku 略 simpler。trivial turn (`User: 繼續`) 兩家都正確返回 `[]`。
+
+2. **OAuth Max + Haiku 4.5 = prompt caching 完全失效**：實測 3 次連續 call 同 system prompt：
+   ```
+   Haiku 4.5:    input=3428 cache_create=0 cache_read=0  ← 連 creation 都 0
+   Sonnet 4.6:   input=22   cache_create=0 cache_read=3407 ← 第一次後全 hit
+   ```
+   不確定是 Anthropic backend 對 OAuth/Haiku 路徑的限制、還是 model snapshot ID 不在 cache list。**API Key 路徑下未驗證**，可能正常。
+
+#### Per-turn 微差
+
+| Turn | Haiku | Sonnet | 觀察 |
+|---|---|---|---|
+| pref + email + nickname | 3 ent / 3 facts | 3 ent / 3 facts | 一致 |
+| tech stack | 3 ent / 3 facts | 3 ent / 3 facts | 一致 |
+| bug state | 1 ent / 1 fact | 2 ent / 1 fact | Sonnet 多抓 "token refresh" 概念（過度） |
+| episodic | 3 ent / 1 fact | 3 ent / 1 fact | Haiku 用 `kiroku-cli` 為 subject、Sonnet 用 `team` |
+| trivial | 0 / 0 | 0 / 0 | 一致 |
+
+#### 對 mode 選擇的真實影響
+
+| 情境 | 推薦 | 為什麼 |
+|---|---|---|
+| 單 session、OAuth Max | **`mode subscription` + 手改 model 為 `claude-sonnet-4-6`** | Sonnet cache 攤銷後 5h window 吃得慢、quality 微優 |
+| 多 session 並用、OAuth Max | **`mode subscription`（default Haiku 4.5）** | burst ≥ 5、即使 no-cache、單 session 順序流量還在 5h budget 內 |
+| API Key | **`mode subscription` + 手改 model**，實測哪家 cache 工作 | 兩家計費獨立、cache 工作則 Sonnet 反而便宜 |
+| 省錢極致 | **`mode api`**（OpenRouter Qwen 3.6） | $1.5/月、不撞任何 quota |
+
+> 後續 follow-up：worker 應該偵測 model 是否實際 cache hit，連續幾次 cache_read=0 時自動降 cache_control（避免 cache_creation 浪費）。目前未實作。
+
 ### 一鍵切換 mode（1.7.5+）
 
 ```bash

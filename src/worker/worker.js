@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, renameSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, renameSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { QUEUE_INCOMING, QUEUE_PROCESSING, QUEUE_DONE, QUEUE_DEAD, WORKER_STATE_PATH } from '../shared/paths.js';
 import { writeFileSync, unlinkSync } from 'node:fs';
@@ -32,6 +32,31 @@ const _batchBuffer = []; // [{ filename, event, processingPath, jid, assistantTu
 let _batchTimer = null;
 let _batchFlushing = false;
 
+const ORPHAN_AGE_MS = 5 * 60 * 1000; // only rescue files idle ≥ 5min in processing/
+
+function rescueOrphanProcessing() {
+  if (!existsSync(QUEUE_PROCESSING)) return;
+  const cutoff = Date.now() - ORPHAN_AGE_MS;
+  let rescued = 0;
+  let skippedRecent = 0;
+  for (const filename of readdirSync(QUEUE_PROCESSING)) {
+    if (!filename.endsWith('.jsonl') || filename.startsWith('.')) continue;
+    const fromPath = join(QUEUE_PROCESSING, filename);
+    let stats;
+    try { stats = statSync(fromPath); } catch { continue; }
+    if (stats.mtimeMs > cutoff) { skippedRecent++; continue; }
+    try {
+      renameSync(fromPath, join(QUEUE_INCOMING, filename));
+      rescued++;
+    } catch (err) {
+      log.warn({ filename, err: err.message }, 'failed to rescue orphan processing file');
+    }
+  }
+  if (rescued > 0 || skippedRecent > 0) {
+    log.info({ rescued, skippedRecent }, 'orphan processing rescue complete');
+  }
+}
+
 export async function startWorker() {
   const config = loadConfig();
   if (!config.worker.enabled) {
@@ -43,6 +68,11 @@ export async function startWorker() {
 
   // If env CLAUDE_CODE_OAUTH_TOKEN is stale vs Keychain, promote Keychain.
   try { reconcileOauthToken(); } catch (err) { log.warn({ err: err.message }, 'oauth reconcile failed'); }
+
+  // Rescue orphan files left in processing/ by a previous crashed worker.
+  // Only files older than 5 minutes are touched, so a concurrently-running
+  // worker (rare race) won't have its in-flight work pulled out from under it.
+  try { rescueOrphanProcessing(); } catch (err) { log.warn({ err: err.message }, 'orphan rescue failed'); }
 
   // Initialize DB
   const db = await initDb();

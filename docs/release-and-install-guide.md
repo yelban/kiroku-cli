@@ -297,6 +297,65 @@ kiroku stop && kiroku start  # 套用
 
 `kiroku mode` 會 merge 進 `~/.kiroku/config.json`，只覆寫 `worker.extraction.{provider,model,effort,batch,...}`，保留 fallback config 跟其他自訂欄位。
 
+### Sonnet 4.6 + batch + cache 三件套（mode subscription 預設）
+
+#### 三件各自貢獻
+
+| 元件 | 做什麼 | 貢獻 |
+|---|---|---|
+| **Sonnet 4.6** | Claude 4.x 中等成本、品質強的 mid-tier model | 比 Haiku 4.5 quality 微優、且 cache 真實工作（Haiku platform-wide cache fail） |
+| **Phase 2 batch** | 5 turn 一個 streaming SSE call、share system prompt、`===TURN_N_END===` delimiter | 截斷 / parse error 時其他 turn 仍落地、整批共用一份 system prompt |
+| **prompt caching** | `cache_control: ephemeral` 把 ~3.3k tokens system prompt 5 分鐘 TTL cache | 第二次起 cache_read 只算 10% input cost ($3 → $0.30/M) |
+
+#### 累積攤銷實證（2026-05，Sonnet 4.6 OAuth 連續 7 輪）
+
+```
+23:05:39  cache_create=2522  cache_read=    0   ← 首次寫入 cache (一次性)
+23:06:58  cache_create=    0  cache_read=2522
+23:08:24  cache_create=    0  cache_read=2522
+23:08:55  cache_create=    0  cache_read=2522
+23:09:31  cache_create=    0  cache_read=2522
+23:10:20  cache_create=    0  cache_read=2522
+23:11:14  cache_create=    0  cache_read=2522
+23:12:17  cache_create=    0  cache_read=2522
+total cache_read = 17,654 tokens（攤銷後 ~10% 原成本）
+```
+
+#### 月費對照（100 turn/day × 30 天 = 3000 turns）
+
+| 配置 | input cost | output cost | 月費 |
+|---|---|---|---|
+| 純單筆 + 無 cache | 3000 × 3500 × $3/M = $31.5 | 3000 × 200 × $15/M = $9 | **$40.5** |
+| Phase 2 batch + 無 cache | 600 × 3500 × $3/M = $6.3 | 600 × 1000 × $15/M = $9 | **$15.3** |
+| **Phase 2 batch + cache（推薦）** | 600 × (50 × $3 + 2522 × $0.30) ≈ $0.55 | 600 × 1000 × $15/M = $9 | **~$10**（input 攤銷 90%） |
+| OAuth Max 訂閱 + 三件套 | 訂閱已付（吃 5h window） | — | **$0** |
+
+實際月費還會更低，因為 output 平均比 1000 token 少（一個 batch 5 turn 但很多 turn 是 trivial / 短 response）。
+
+#### 適合場景
+
+- ✅ 中重度開發 / 對話頻率 > 50 turn/day
+- ✅ 訂閱 Claude Pro/Max + 單 session 用（worker single-flight=1，不撞 Sonnet burst ≤ 2）
+- ✅ 想保留高品質 entity / fact extraction（Haiku 略弱、Qwen 略弱於 Anthropic）
+- ✅ 用量穩定能觸發 cache 5 分鐘 TTL（連續對話、不長時間 idle）
+
+#### 不適合場景（改 `mode api` 反而省）
+
+- ❌ 用量極低（< 30 turn/day）：cache 5 分鐘 TTL 來不及命中、付了 cache_create 沒攤銷到、不如走 Qwen Flash $1/月
+- ❌ 多 Claude Code session 並用 + 重 batch：Sonnet 4.6 OAuth burst ≤ 2、容易撞 429。要嘛切 API Key（脫離 OAuth burst limit）、要嘛改 Haiku 4.5（burst ≥ 5 但 cache 失效）
+- ❌ 不在意 entity/fact extraction quality 微差：Qwen 3.6 Flash 對純 JSON 抽取夠用 + 月費 $1-3
+
+#### 限制與雷
+
+| 限制 | 說明 |
+|---|---|
+| 只 anthropic provider 支援 | 其他 provider 走單筆 `extract()`（filter / throttle 仍生效，但無 batch + cache） |
+| **Haiku 4.5 cache 失效** | platform-wide：OAuth + API key 都不 cache。**不要用 Haiku + cache_control**，反而花 cache_creation 開銷沒攤銷。1.7.8+ 自動偵測降級（連續 3 次 creation 沒 read → 拿掉 cache_control 24h）|
+| Cache TTL 5 分鐘 | worker idle 5+ 分鐘後 cache 過期、下次 batch 重新 cache_creation。對中重度對話頻率不影響 |
+| OAuth Sonnet 並發 ≤ 2 | single worker（_batchFlushing=1）OK；user 對話 + worker batch 同送可能瞬間 ≥ 2 撞 burst |
+| Batch 截斷的部分恢復 | `stop_reason: max_tokens` 時前面已完整 turn 落地、後面進 `truncatedTail` 重新排回 incoming |
+| JSON parse error 1 個 turn 一定 dead-letter | 整批仍其他 turn 落地、不影響其他人；Sonnet 約 ~10% 機率、Haiku ~12% |
+
 ### 三條 Provider 配置（按 use case）
 
 A. **訂閱 Claude Pro/Max + 多 session 並用** — Haiku 4.5（burst 寬鬆）

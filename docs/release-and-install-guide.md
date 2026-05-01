@@ -241,12 +241,27 @@ API Key 反而便宜是因為 worker extraction 真實用量很少（每天可�
 
 1. **品質相當**：兩家 5/5 parse OK，無 hallucination、無 schema drift。Sonnet 偶爾 over-extract（多抓一個沒必要的 concept entity，如 turn 3 的 "token refresh"）；Haiku 略 simpler。trivial turn (`User: 繼續`) 兩家都正確返回 `[]`。
 
-2. **OAuth Max + Haiku 4.5 = prompt caching 完全失效**：實測 3 次連續 call 同 system prompt：
+2. **Haiku 4.5 prompt caching 在 OAuth 跟 API Key 路徑都完全失效（platform-wide）**：
+
+   先後實測 OAuth Max 跟 sk-ant-api03 兩條路徑、3 次連發同一 system prompt：
    ```
-   Haiku 4.5:    input=3428 cache_create=0 cache_read=0  ← 連 creation 都 0
-   Sonnet 4.6:   input=22   cache_create=0 cache_read=3407 ← 第一次後全 hit
+   Haiku 4.5    OAuth+API Key 都一樣：
+     call 1-3: input=3414 cache_create=0 cache_read=0   ← 全部 fresh charge
+
+   Sonnet 4.6   兩條路徑都正常：
+     call 1: input=22 cache_create=3393 cache_read=0    ← creation
+     call 2: input=22 cache_create=0    cache_read=3393 ← hit
+     call 3: input=22 cache_create=0    cache_read=3393 ← hit
    ```
-   不確定是 Anthropic backend 對 OAuth/Haiku 路徑的限制、還是 model snapshot ID 不在 cache list。**API Key 路徑下未驗證**，可能正常。
+
+   結論：Haiku 4.5 在 Anthropic 平台層級不支援 prompt caching（不論 auth 方式）。可能是 backend 還沒部署、或 model snapshot ID 不在 cache list。值得向 Anthropic support 確認。
+
+   **這顛覆「Haiku 比 Sonnet 便宜」的直覺**——cache 攤銷後 Sonnet 4.6 反而更便宜：
+
+   | 100 turn/day × 30 天 | 計算 | 月費 |
+   |---|---|---|
+   | Haiku 4.5（無 cache） | 10.5M input × $0.80 + 0.6M out × $4 | **$10.8** |
+   | Sonnet 4.6（cache 命中） | 3000 × 3400 cache_read × $0.30/M + 3000 × 22 input × $3/M + 3000 × 100 out × $15/M | **$7.8** |
 
 #### Per-turn 微差
 
@@ -258,14 +273,16 @@ API Key 反而便宜是因為 worker extraction 真實用量很少（每天可�
 | episodic | 3 ent / 1 fact | 3 ent / 1 fact | Haiku 用 `kiroku-cli` 為 subject、Sonnet 用 `team` |
 | trivial | 0 / 0 | 0 / 0 | 一致 |
 
-#### 對 mode 選擇的真實影響
+#### 對 mode 選擇的真實影響（2026-05 實證後修訂）
 
 | 情境 | 推薦 | 為什麼 |
 |---|---|---|
-| 單 session、OAuth Max | **`mode subscription` + 手改 model 為 `claude-sonnet-4-6`** | Sonnet cache 攤銷後 5h window 吃得慢、quality 微優 |
-| 多 session 並用、OAuth Max | **`mode subscription`（default Haiku 4.5）** | burst ≥ 5、即使 no-cache、單 session 順序流量還在 5h budget 內 |
-| API Key | **`mode subscription` + 手改 model**，實測哪家 cache 工作 | 兩家計費獨立、cache 工作則 Sonnet 反而便宜 |
-| 省錢極致 | **`mode api`**（OpenRouter Qwen 3.6） | $1.5/月、不撞任何 quota |
+| 單 session worker（_batchFlushing single-flight） | **`mode subscription` + 手改 model 為 `claude-sonnet-4-6`** | Sonnet cache 命中、~$7.8/月、quality 微優、single-flight 不撞 burst |
+| 多 session 並用（OAuth Max） | **`mode subscription`（default Haiku 4.5）** | Haiku no-cache 但 burst ≥ 5；Sonnet ≤ 2 burst 在多並發場景吃 429 |
+| API Key + 任何 session 數 | **改用 Sonnet 4.6** | Haiku 沒 cache 反而貴；API Key burst 限制比 OAuth 寬，多 session 也安全 |
+| 省錢極致（不在乎 batch+cache） | **`mode api`**（OpenRouter Qwen 3.6） | $1.5/月、Anthropic 之外完全不踩 burst/quota 雷 |
+
+> 測試 Anthropic 帳戶：API key 走獨立 credit pool，跟訂閱的 Extra usage credit 不互通。要 API key 能用須去 [console / Plans & Billing](https://console.anthropic.com/settings/billing) 加 API credits（不是 spending limit）。
 
 > 後續 follow-up：worker 應該偵測 model 是否實際 cache hit，連續幾次 cache_read=0 時自動降 cache_control（避免 cache_creation 浪費）。目前未實作。
 

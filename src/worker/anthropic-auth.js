@@ -13,7 +13,7 @@ const REFRESH_ENDPOINTS = [
   'https://platform.claude.com/v1/oauth/token',
   'https://console.anthropic.com/v1/oauth/token',
 ];
-const COMMON_BETAS = ['effort-2025-11-24', 'extended-output-2025-02-19'];
+const COMMON_BETAS = ['effort-2025-11-24'];
 const OAUTH_BETAS = ['claude-code-20250219', 'oauth-2025-04-20', ...COMMON_BETAS].join(',');
 const APIKEY_BETAS = COMMON_BETAS.join(',');
 

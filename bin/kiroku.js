@@ -1069,7 +1069,7 @@ async function cmdMode() {
     console.log();
     console.log('Switch with:');
     console.log('  kiroku mode subscription   # OAuth/API + Sonnet 4.6 + batch + cache');
-    console.log('  kiroku mode api            # OpenRouter + Qwen 3.6, batch & cache off');
+    console.log('  kiroku mode api            # OpenRouter + Qwen 3.6 Flash, batch & cache off');
     return;
   }
 
@@ -1107,7 +1107,11 @@ async function cmdMode() {
     cfg.worker.extraction = {
       ...oldExt,
       provider: 'openrouter',
-      model: 'qwen/qwen3.6-35b-a3b',
+      // Qwen 3.6 Flash returns extraction JSON in `content` (reasoning trace
+      // also present but ignored). Sister model qwen3.6-35b-a3b is a pure
+      // thinking model that returns content:null, so callOpenAICompatible
+      // would always see "Empty extraction response" — verified empirically.
+      model: 'qwen/qwen3.6-flash',
       apiKeyEnv: 'OPENROUTER_API_KEY',
       temperature: 0,
       maxOutputTokens: 2048,
@@ -1187,7 +1191,7 @@ Recording options:
 Mode presets:
   kiroku mode show           # Show current worker config
   kiroku mode subscription   # OAuth/API + Sonnet 4.6 + batch + cache
-  kiroku mode api            # OpenRouter + Qwen 3.6, batch & cache off
+  kiroku mode api            # OpenRouter + Qwen 3.6 Flash, batch & cache off
 
 Examples:
   kiroku init            # First-time setup

@@ -266,7 +266,7 @@ API Key 反而便宜是因為 worker extraction 真實用量很少（每天可�
      call 3: input=22 cache_create=0    cache_read=3393 ← hit
    ```
 
-   結論：Haiku 4.5 在 Anthropic 平台層級不支援 prompt caching（不論 auth 方式）。可能是 backend 還沒部署、或 model snapshot ID 不在 cache list。值得向 Anthropic support 確認。
+   結論：Haiku 4.5 在 Anthropic 平台層級不支援 prompt caching（不論 auth 方式）。可能是 backend 還沒部署、或 model snapshot ID 不在 cache list。Support ticket 草稿（含 6 個 request_id 證據）：[`docs/anthropic-support-ticket-haiku-cache.md`](anthropic-support-ticket-haiku-cache.md)。
 
    **這顛覆「Haiku 比 Sonnet 便宜」的直覺**——cache 攤銷後 Sonnet 4.6 反而更便宜：
 
@@ -609,3 +609,4 @@ kiroku stop && kiroku start   # 套用
 | `8302aed` | 1.7.10 | Feat — ratelimit-aware retry + utilization logging (anthropic-ratelimit-unified-* headers) |
 | `e2f656f` | 1.7.11 | Feat — extractBatch supports OpenRouter + OpenAI-compatible (mode api batch on default) |
 | `7febc4c` | 1.7.12 | Feat — `kiroku dead-letter` list/retry/clear subcommand |
+| `5c614cc` | 1.7.13 | Feat — `kiroku status` shows mode + cache + ratelimit utilization |

@@ -625,3 +625,4 @@ kiroku stop && kiroku start   # 套用
 | `66035cf` | 1.7.15 | Fix — chunked decay sweep (5000-row tx, yield between chunks) |
 | `a1386e4` | 1.7.16 | Refactor — prompt-loader batch slot scaffolding (no behavior change) |
 | `f0a06e6` | 1.7.17 | Feat — server-side `?slot=` route + client multi-slot fetch/cache |
+| `4a58115` | 1.7.18 | Feat — extractBatch supports Gemini direct (streamGenerateContent SSE) |

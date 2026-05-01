@@ -212,11 +212,17 @@ API Key 反而便宜是因為 worker extraction 真實用量很少（每天可�
 | GPT-5.4 Nano | OpenAI direct | 0.20 | 1.25 | **~$1.5** | 不支援 |
 | GPT-5.4 Mini | OpenAI direct | 0.75 | 4.50 | ~$6 | 不支援 |
 | DeepSeek V3.2 | OpenRouter | 0.25 | 0.38 | **~$1.5** | 不支援 |
-| Qwen 2.5 32B | OpenRouter | 0.16 | 0.97 | ~$1.5（JSON 最穩） | 不支援 |
+| Qwen 2.5 32B | OpenRouter | 0.16 | 0.97 | ~$1.5（JSON 已知穩） | 不支援 |
+| Qwen 3.6 35B A3B | OpenRouter | 0.16 | 0.97 | ~$1.5（架構新、預期略優） | 不支援 |
+| Qwen 3.6 Flash | OpenRouter | 0.25 | 1.50 | ~$2.5（1M context） | 不支援 |
+| Qwen 3.6 Plus | OpenRouter | 0.33 | 1.95 | ~$3.5（最高品質 Qwen） | 不支援 |
+| Qwen 3.6 Plus Preview (free) | OpenRouter | 0 | 0 | $0（測試用，20 RPM / 200 day） | 不支援 |
 | Claude Haiku 4.5 | Anthropic API Key | 0.80 | 4.00 | **~$3** | ✅ |
 | Claude Sonnet 4.6 | Anthropic API Key | 3.00 | 15.00 | ~$8-15 | ✅ |
 | Claude Sonnet 4.6 | OAuth Max 訂閱 | 訂閱 | 訂閱 | $0 | ✅ but burst ≤ 2 |
 | Claude Haiku 4.5 | OAuth Max 訂閱 | 訂閱 | 訂閱 | $0 | ✅ burst ≥ 5 |
+
+> Qwen 3.6 vs 2.5 沒有公開 JSON 抽取 head-to-head benchmark，但 3.6 是 MoE + 2026-04 釋出（vs 2.5 一年半舊），架構升級 + 訓練資料新，**推理速度 ~2x**、**同價**。worker 的 `callOpenAICompatible` 不送 `response_format` 參數，全靠 prompt-following + `parseExtractionResult` 補救，所以模型 prompt-following 能力是關鍵——Qwen 3.6 一般略優。要實證請拿 5-10 個有 ground truth 的 turn 跑兩家比對。
 
 **重要：`extractBatch` + prompt caching 只 anthropic provider 支援。** 其他 provider 走 `extract()` 單筆 path（filter / throttle / effort 仍生效，但無法享受 ~70% input token 攤銷）。所以 batch+cache 攤銷後的 Haiku 4.5 ($3/月) 很接近單筆的 GPT-5.4 Nano ($1.5/月) 但有 batch 容錯加成。
 
@@ -246,7 +252,7 @@ OpenRouter + DeepSeek V3.2：
 }
 ```
 
-OpenRouter + Qwen 2.5 32B（JSON 抽取最穩）：
+OpenRouter + Qwen 2.5 32B（JSON 已知穩、保守）：
 ```json
 "extraction": {
   "provider": "openrouter",
@@ -254,6 +260,25 @@ OpenRouter + Qwen 2.5 32B（JSON 抽取最穩）：
   "apiKeyEnv": "OPENROUTER_API_KEY"
 }
 ```
+
+OpenRouter + Qwen 3.6 35B A3B（同價、架構新、推理快 ~2x、預期略優）：
+```json
+"extraction": {
+  "provider": "openrouter",
+  "model": "qwen/qwen3.6-35b-a3b",
+  "apiKeyEnv": "OPENROUTER_API_KEY"
+}
+```
+
+OpenRouter + Qwen 3.6 Plus Preview（**免費**、適合 dogfood）：
+```json
+"extraction": {
+  "provider": "openrouter",
+  "model": "qwen/qwen3.6-plus-preview:free",
+  "apiKeyEnv": "OPENROUTER_API_KEY"
+}
+```
+> 注意：免費 tier 有 20 RPM / 200 req/day 限制；放在 worker 重 batch 流量會撞牆，但拿來測 quality 跟原 Anthropic / Gemini 對比的 baseline 很合適。
 
 OpenAI direct + GPT-5.4 Nano（最低單價）：
 ```json

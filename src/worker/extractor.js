@@ -5,10 +5,12 @@ import { join } from 'node:path';
 import { KIROKU_ROOT } from '../shared/paths.js';
 import { createLogger } from '../shared/logger.js';
 import { resolveAnthropicAuth, buildAuthHeaders } from './anthropic-auth.js';
+import { createBatchStreamParser } from './batch-parser.js';
 
 const log = createLogger('extractor');
 
 let _systemPrompt = null;
+let _batchSystemPrompt = null;
 let _getPromptOverride = null;
 
 // Allow prompt-loader to inject premium prompt
@@ -32,6 +34,85 @@ function getSystemPrompt() {
     _systemPrompt = readFileSync(basicPath, 'utf8');
   }
   return _systemPrompt;
+}
+
+function getBatchSystemPrompt() {
+  if (_batchSystemPrompt) return _batchSystemPrompt;
+  const path = join(KIROKU_ROOT, 'prompts', 'extraction-batch.md');
+  if (existsSync(path)) {
+    _batchSystemPrompt = readFileSync(path, 'utf8');
+  } else {
+    log.warn({ path }, 'extraction-batch.md missing, falling back to single-turn prompt');
+    _batchSystemPrompt = getSystemPrompt();
+  }
+  return _batchSystemPrompt;
+}
+
+export async function extractBatch(turns, extractionConfig) {
+  const provider = extractionConfig.provider;
+  if (provider !== 'anthropic') {
+    throw new Error(`extractBatch only supports anthropic provider (got: ${provider})`);
+  }
+  return await extractBatchAnthropic(turns, extractionConfig);
+}
+
+async function extractBatchAnthropic(turns, config) {
+  const auth = await resolveAnthropicAuth(config);
+
+  const userMessage = turns.map((t, idx) =>
+    `===TURN_${idx}===\n${t.text}\n===TURN_${idx}_END_INPUT===`
+  ).join('\n\n');
+
+  const requestBody = {
+    model: config.model || 'claude-haiku-4-5-20251001',
+    max_tokens: config.maxOutputTokens || 8000,
+    stream: true,
+    system: [
+      {
+        type: 'text',
+        text: getBatchSystemPrompt(),
+        cache_control: { type: 'ephemeral' },
+      },
+    ],
+    messages: [{ role: 'user', content: userMessage }],
+  };
+  if (config.effort) {
+    requestBody.output_config = { effort: config.effort };
+  }
+  const body = JSON.stringify(requestBody);
+
+  const url = new URL(auth.baseUrl);
+  const authHeaders = buildAuthHeaders(auth);
+  const parser = createBatchStreamParser();
+
+  await httpRequestStreaming({
+    hostname: url.hostname,
+    port: parseInt(url.port) || (url.protocol === 'https:' ? 443 : 80),
+    path: (url.pathname.includes('/v1') ? url.pathname.replace(/\/$/, '') : url.pathname.replace(/\/$/, '') + '/v1') + '/messages',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+      ...authHeaders,
+      'Content-Length': Buffer.byteLength(body),
+    },
+    protocol: url.protocol.replace(':', ''),
+    onData: chunk => parser.feed(chunk),
+  }, body);
+
+  const result = parser.finalize();
+  const u = result.usage || {};
+  log.info({
+    cache_creation: u.cache_creation_input_tokens || 0,
+    cache_read: u.cache_read_input_tokens || 0,
+    input: u.input_tokens || 0,
+    output: u.output_tokens || 0,
+    stop: result.stopReason,
+    requested: turns.length,
+    completed: result.completedTurns.length,
+    errors: result.errors.length,
+  }, 'batch extraction usage');
+  return result;
 }
 
 export async function extract(text, extractionConfig) {
@@ -257,6 +338,42 @@ function httpRequest(options, body) {
     });
     req.on('error', reject);
     req.setTimeout(60000, () => { req.destroy(new Error('Request timeout')); });
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+function httpRequestStreaming(options, body) {
+  return new Promise((resolve, reject) => {
+    const mod = options.protocol === 'https' ? https : http;
+    const opts = { ...options };
+    delete opts.protocol;
+    const onData = options.onData;
+    delete opts.onData;
+    if (typeof onData !== 'function') {
+      reject(new Error('httpRequestStreaming requires options.onData'));
+      return;
+    }
+    const req = mod.request(opts, res => {
+      if (res.statusCode >= 400) {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          const data = Buffer.concat(chunks).toString('utf8');
+          reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
+        });
+        res.on('error', reject);
+        return;
+      }
+      res.on('data', chunk => {
+        try { onData(chunk); }
+        catch (err) { req.destroy(err); }
+      });
+      res.on('end', () => resolve());
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(120_000, () => req.destroy(new Error('Streaming request timeout')));
     if (body) req.write(body);
     req.end();
   });

@@ -6,7 +6,7 @@ import { loadConfig } from '../shared/config.js';
 import { createLogger } from '../shared/logger.js';
 import { initDb, runMigrations, closeDb } from '../shared/db.js';
 import { jobId } from '../shared/ids.js';
-import { extract, setPromptProvider } from './extractor.js';
+import { extract, extractBatch, setPromptProvider } from './extractor.js';
 import { embedTexts, initEmbedder } from './embedder.js';
 import { initPromptLoader, getPrompt, stopPromptLoader } from './prompt-loader.js';
 import { setDb, storeTurn, storeEntities, storeFacts, storeEmbeddings, createExtractionJob, updateExtractionJob, runDecaySweep, runCompactionSweep } from './store.js';
@@ -24,6 +24,11 @@ let _dailyExtractCount = 0;
 let _dailyExtractDate = '';
 const _retryAttempts = new Map(); // filename -> { count, nextAttemptAfter }
 const _throttle = createThrottle();
+
+// Batch pipeline state (Phase 2)
+const _batchBuffer = []; // [{ filename, event, processingPath, jid, assistantTurnId }]
+let _batchTimer = null;
+let _batchFlushing = false;
 
 export async function startWorker() {
   const config = loadConfig();
@@ -179,13 +184,27 @@ async function processFile(filename, config) {
       return;
     }
 
+    // 4. If batch mode is enabled (anthropic provider only), hand off to batch pipeline.
+    const batchCfg = config.worker.extraction.batch;
+    if (batchCfg?.enabled && config.worker.extraction.provider === 'anthropic') {
+      bufferEvent({
+        filename,
+        event,
+        processingPath,
+        jid,
+        assistantTurnId: turnData.assistantTurnId,
+        combinedText,
+      }, config);
+      return;
+    }
+
     const extraction = await extractWithRetry(combinedText, config);
 
-    // 3. Store entities and facts
+    // 5. Store entities and facts
     const entityMap = storeEntities(extraction.entities, event.project_id);
     const factResults = storeFacts(extraction.facts, entityMap, event.project_id, turnData.assistantTurnId, _licenseState);
 
-    // 4. Generate embeddings only for actually inserted facts (filter out deduped nulls)
+    // 6. Generate embeddings only for actually inserted facts (filter out deduped nulls)
     const inserted = factResults
       .map((fid, i) => fid ? { fid, fact: extraction.facts[i] } : null)
       .filter(Boolean);
@@ -263,6 +282,202 @@ async function extractWithRetry(text, config) {
   throw lastErr;
 }
 
+// --- Batch pipeline (Phase 2) ---
+
+function estimateInputTokens(event) {
+  const text = (event?.request?.user_text || '') + (event?.response?.assistant_text || '');
+  return Math.ceil(text.length / 3);
+}
+
+function computeBatchTakeCount(buffer, batchCfg) {
+  const max = batchCfg.maxTurnsPerCall || 10;
+  const budget = (batchCfg.outputTokenBudget || 6000) * 4;
+  let total = 0;
+  let count = 0;
+  for (const item of buffer) {
+    const t = estimateInputTokens(item.event);
+    if (count > 0 && total + t > budget) break;
+    total += t;
+    count++;
+    if (count >= max) break;
+  }
+  return Math.max(1, count);
+}
+
+function bufferEvent(item, config) {
+  _batchBuffer.push(item);
+  const batchCfg = config.worker.extraction.batch;
+  if (_batchBuffer.length >= (batchCfg.maxTurnsPerCall || 10)) {
+    flushBatch(config).catch(err => log.error({ err: err.message }, 'flushBatch (size trigger) failed'));
+    return;
+  }
+  scheduleBatchFlush(config);
+}
+
+function scheduleBatchFlush(config) {
+  if (_batchTimer) return;
+  const ms = config.worker.extraction.batch.flushTimeoutMs || 30_000;
+  _batchTimer = setTimeout(() => {
+    _batchTimer = null;
+    flushBatch(config, { force: true }).catch(err => log.error({ err: err.message }, 'flushBatch (timer) failed'));
+  }, ms);
+}
+
+async function flushBatch(config, opts = {}) {
+  if (_batchFlushing) return;
+  if (_batchBuffer.length === 0) return;
+  const batchCfg = config.worker.extraction.batch;
+  const minTurns = batchCfg.minTurnsPerCall || 1;
+  if (!opts.force && _batchBuffer.length < minTurns) {
+    scheduleBatchFlush(config);
+    return;
+  }
+  if (_batchTimer) {
+    clearTimeout(_batchTimer);
+    _batchTimer = null;
+  }
+  const take = computeBatchTakeCount(_batchBuffer, batchCfg);
+  const items = _batchBuffer.splice(0, take);
+  _batchFlushing = true;
+  try {
+    await processBatch(items, config);
+  } catch (err) {
+    log.error({ err: err.message, batchSize: items.length }, 'processBatch threw');
+  } finally {
+    _batchFlushing = false;
+    if (_batchBuffer.length > 0) scheduleBatchFlush(config);
+  }
+}
+
+async function processBatch(items, config) {
+  const turns = items.map(item => ({ text: item.combinedText }));
+
+  let result;
+  try {
+    result = await extractBatch(turns, config.worker.extraction);
+  } catch (err) {
+    log.error({ err: err.message, batchSize: items.length }, 'batch extraction failed, requeueing all');
+    for (const item of items) retryItem(item, config, err);
+    return;
+  }
+
+  const completedByIndex = new Map();
+  for (const t of result.completedTurns || []) completedByIndex.set(t.turn_index, t);
+
+  const errorsByIndex = new Map();
+  for (const e of result.errors || []) {
+    if (e.kind === 'json_parse_error' && typeof e.turn_index === 'number') {
+      errorsByIndex.set(e.turn_index, e);
+    }
+  }
+
+  for (let idx = 0; idx < items.length; idx++) {
+    const item = items[idx];
+    const turn = completedByIndex.get(idx);
+    const parseErr = errorsByIndex.get(idx);
+
+    if (turn) {
+      try {
+        await persistBatchTurn(item, turn, config);
+      } catch (err) {
+        log.error({ jid: item.jid, idx, err: err.message }, 'batch turn persist failed, requeueing');
+        retryItem(item, config, err);
+      }
+    } else if (parseErr) {
+      log.error({ jid: item.jid, idx, parseErr }, 'batch turn JSON parse failed, dead-lettering');
+      updateExtractionJob(item.jid, {
+        status: 'failed',
+        lastError: `batch json parse: ${parseErr.message || 'invalid JSON'}`,
+      });
+      try { renameSync(item.processingPath, join(QUEUE_DEAD, item.filename)); } catch { /* already moved */ }
+      _retryAttempts.delete(item.filename);
+    } else {
+      log.warn({ jid: item.jid, idx, stopReason: result.stopReason }, 'batch turn truncated, requeueing');
+      retryItem(item, config, new Error(`batch turn ${idx} truncated (stop=${result.stopReason || 'unknown'})`));
+    }
+  }
+}
+
+async function persistBatchTurn(item, turn, config) {
+  const projectId = item.event.project_id;
+  const entityMap = storeEntities(turn.entities || [], projectId);
+  const factResults = storeFacts(turn.facts || [], entityMap, projectId, item.assistantTurnId, _licenseState);
+
+  const facts = turn.facts || [];
+  const inserted = factResults
+    .map((fid, i) => fid ? { fid, fact: facts[i] } : null)
+    .filter(Boolean);
+
+  if (inserted.length > 0 && (!_licenseState || _licenseState.embeddingEnabled)) {
+    const factTexts = inserted.map(p => `${p.fact.subject} ${p.fact.predicate} ${p.fact.object}`);
+    const embeddings = await embedTexts(factTexts);
+    storeEmbeddings(
+      inserted.map(p => p.fid),
+      embeddings,
+      projectId,
+      inserted.map(p => p.fact),
+    );
+  }
+
+  updateExtractionJob(item.jid, {
+    status: 'done',
+    provider: config.worker.extraction.provider,
+    model: config.worker.extraction.model,
+    finishedAt: new Date().toISOString(),
+  });
+  renameSync(item.processingPath, join(QUEUE_DONE, item.filename));
+  _retryAttempts.delete(item.filename);
+  log.info({
+    jid: item.jid,
+    eventId: item.event.event_id,
+    entities: (turn.entities || []).length,
+    facts: facts.length,
+    inserted: inserted.length,
+  }, 'batch turn processed');
+}
+
+function retryItem(item, config, err) {
+  const retry = _retryAttempts.get(item.filename) || { count: 0 };
+  const attempt = retry.count + 1;
+  const maxAttempts = config.worker.retry.maxAttempts;
+
+  updateExtractionJob(item.jid, {
+    status: attempt >= maxAttempts ? 'failed' : 'retrying',
+    lastError: err.message,
+    attempts: attempt,
+  });
+
+  if (attempt >= maxAttempts) {
+    try { renameSync(item.processingPath, join(QUEUE_DEAD, item.filename)); } catch { /* already moved */ }
+    _retryAttempts.delete(item.filename);
+    log.warn({ jid: item.jid, filename: item.filename, attempts: attempt }, 'batch item moved to dead-letter');
+    return;
+  }
+
+  try { renameSync(item.processingPath, join(QUEUE_INCOMING, item.filename)); }
+  catch (e) { log.warn({ filename: item.filename, err: e.message }, 'failed to requeue batch item'); }
+
+  const delay = Math.min(
+    config.worker.retry.baseDelayMs * Math.pow(2, attempt - 1),
+    config.worker.retry.maxDelayMs,
+  );
+  _retryAttempts.set(item.filename, { count: attempt, nextAttemptAfter: Date.now() + delay });
+  log.info({ jid: item.jid, filename: item.filename, attempt, delay }, 'batch item scheduled retry');
+}
+
+function rescueBatchBuffer() {
+  if (_batchBuffer.length === 0) return;
+  for (const item of _batchBuffer) {
+    try {
+      renameSync(item.processingPath, join(QUEUE_INCOMING, item.filename));
+      log.info({ filename: item.filename }, 'batch buffer rescued back to incoming');
+    } catch (err) {
+      log.warn({ filename: item.filename, err: err.message }, 'failed to rescue batch buffer item');
+    }
+  }
+  _batchBuffer.length = 0;
+}
+
 export function stopWorker() {
   running = false;
   stopPromptLoader();
@@ -274,6 +489,11 @@ export function stopWorker() {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+  if (_batchTimer) {
+    clearTimeout(_batchTimer);
+    _batchTimer = null;
+  }
+  rescueBatchBuffer();
   closeDb();
   try { if (existsSync(WORKER_STATE_PATH)) unlinkSync(WORKER_STATE_PATH); } catch {}
   log.info('worker stopped');

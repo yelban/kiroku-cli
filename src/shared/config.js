@@ -67,6 +67,14 @@ const ConfigSchema = z.object({
       temperature: z.number().default(0),
       maxOutputTokens: z.number().default(1200),
       effort: z.enum(['low', 'medium', 'high', 'max']).default('medium'),
+      batch: z.object({
+        enabled: z.boolean().default(false),
+        maxTurnsPerCall: z.number().default(10),
+        minTurnsPerCall: z.number().default(3),
+        flushTimeoutMs: z.number().default(30000),
+        outputTokenBudget: z.number().default(6000),
+        estimateOutputPerTurn: z.number().default(800),
+      }).default({}),
       fallback: z.object({
         provider: z.string().default('ollama'),
         model: z.string().default('qwen2.5:14b-instruct-q4_K_M'),

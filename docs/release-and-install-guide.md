@@ -515,6 +515,55 @@ kiroku stop && kiroku start
 
 ---
 
+## 1.7.x 切換驗證紀錄（2026-05-01）
+
+### Sonnet 4.6 + batch + cache 已確認正常運行 ✅
+
+`mode subscription`（Sonnet 4.6 + Phase 2 batch + prompt caching）OAuth Max 連續 7 輪 cache hit 紀錄：
+
+```
+23:05:39  cache_create=2522  cache_read=    0   ← 首次寫入 cache
+23:06:58  cache_create=    0  cache_read= 2522
+23:08:24  cache_create=    0  cache_read= 2522
+23:08:55  cache_create=    0  cache_read= 2522
+23:09:31  cache_create=    0  cache_read= 2522
+23:10:20  cache_create=    0  cache_read= 2522
+23:11:14  cache_create=    0  cache_read= 2522  status=healthy   (1.7.8 cache-health 啟用)
+23:12:17  cache_create=    0  cache_read= 2522  status=healthy
+total cache_read = 17,654 tokens（攤銷後 input cost ~10% 原價，省 90%）
+```
+
+### 切到 OpenRouter Qwen 3.6 Flash 也成功 ✅
+
+`mode api`（OpenRouter + Qwen 3.6 Flash + 單筆 path）連續 5 turn extraction 成功：
+
+```
+23:16:34  evt_AkojhAIbiiVnnOFN  ent= 8  facts=4  inserted=2
+23:17:28  evt_3xC4MeHpJFdiHS_1  ent=10  facts=6  inserted=5
+23:17:34  evt_hjY1A5yiyNeocusm  ent= 7  facts=4  inserted=4
+23:17:43  evt_7L95aTauYsRh-Mm9  ent= 8  facts=4  inserted=1
+23:18:11  evt_PGmM2Exwqo8oX4tR  ent= 8  facts=4  inserted=2
+```
+
+### 切換中發現的雷
+
+| 雷 | 影響 | 修復 |
+|---|---|---|
+| `qwen/qwen3.6-35b-a3b` 是 reasoning-only model（content=null，答案在 reasoning 欄位） | worker `callOpenAICompatible` 永遠拿不到 content、retry-loop 直到 dead-letter | 1.7.9 把 mode api preset 從 35b-a3b 改 `qwen/qwen3.6-flash` |
+| Anthropic Extra usage credit 跟 API key credit 是兩條獨立帳單 | API key 仍 `credit balance is too low` 即使訂閱 Extra usage 還有 $148 | docs 加註「要 API key 必須獨立儲值」 |
+| API key 放錯 ENV 變數（`ANTHROPIC_AUTH_TOKEN` vs `ANTHROPIC_API_KEY`） | Bearer header 收 sk-ant-api03 → HTTP 401 Invalid bearer token | docs 列 priority + header 對應表 |
+
+### 切換指令快查
+
+```bash
+kiroku mode show              # 看當前設定
+kiroku mode subscription      # 切 OAuth/API + Sonnet 4.6 + batch + cache
+kiroku mode api               # 切 OpenRouter + Qwen 3.6 Flash 單筆 path
+kiroku stop && kiroku start   # 套用
+```
+
+---
+
 ## 相關 commit
 
 | Commit | 版本 | 內容 |
@@ -528,3 +577,9 @@ kiroku stop && kiroku start
 | `9c3f041` | 1.7.2 | Fix — finer-grained yields in compaction sweep |
 | `ccf3f04` | 1.7.3 | Feat — auto-reconcile env OAuth token vs Keychain (startup) |
 | `5b74166` | 1.7.4 | Feat — 401 retry + periodic 5min reconcile |
+| `b076e68` | 1.7.5 | Feat — `kiroku mode` subcommand (subscription / api / show) |
+| `ce43540` | 1.7.6 | Fix — Haiku 4.5 effort param rejection + runtime fallback |
+| `f7a88ff` | 1.7.7 | Fix — rescue orphan processing/ files on startup |
+| `3505aca` | 1.7.7 | Feat — mode subscription default Sonnet 4.6 (drop Haiku) |
+| `6d98bb9` | 1.7.8 | Feat — cache-health auto-disable for broken-cache models |
+| `c9739c8` | 1.7.9 | Fix — mode api default Qwen 3.6 Flash (avoid 35B A3B reasoning-only) |

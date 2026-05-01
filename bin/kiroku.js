@@ -53,6 +53,7 @@ const COMMANDS = {
   rec: cmdRec,
   play: cmdPlay,
   recs: cmdRecs,
+  mode: cmdMode,
   'hook-on-stop': cmdHookOnStop,
   help: cmdHelp,
 };
@@ -1031,6 +1032,100 @@ async function cmdLicense() {
   console.log(`Embedding:  ${state.embeddingEnabled ? 'enabled' : 'disabled'}`);
 }
 
+function detectMode(ext) {
+  if (ext.provider === 'anthropic' && ext.batch?.enabled && /haiku/i.test(ext.model || '')) {
+    return 'subscription (OAuth/API + Haiku 4.5 + batch)';
+  }
+  if (ext.provider === 'anthropic' && ext.batch?.enabled) {
+    return `subscription (Anthropic / ${ext.model} + batch)`;
+  }
+  if (ext.provider !== 'anthropic') {
+    return `api (${ext.provider}${ext.model ? ' / ' + ext.model : ''}, batch off)`;
+  }
+  return 'custom';
+}
+
+async function cmdMode() {
+  const p = await paths();
+  const sub = args[0];
+
+  if (!existsSync(p.CONFIG_PATH)) {
+    console.error('No config found at ' + p.CONFIG_PATH + '. Run `kiroku init` first.');
+    process.exit(1);
+  }
+
+  const cfg = JSON.parse(readFileSync(p.CONFIG_PATH, 'utf8'));
+  if (!cfg.worker) cfg.worker = {};
+  const oldExt = cfg.worker.extraction || {};
+
+  if (!sub || sub === 'show') {
+    console.log(`Current mode: ${detectMode(oldExt)}`);
+    console.log(`  provider:  ${oldExt.provider || '(default)'}`);
+    console.log(`  model:     ${oldExt.model || '(default)'}`);
+    console.log(`  effort:    ${oldExt.effort || '(unset)'}`);
+    console.log(`  batch:     ${oldExt.batch?.enabled ? 'enabled (' + (oldExt.batch.maxTurnsPerCall || 10) + ' turns/call)' : 'disabled'}`);
+    console.log(`  caching:   ${oldExt.provider === 'anthropic' ? 'enabled (cache_control: ephemeral)' : 'disabled (provider does not support)'}`);
+    if (sub === 'show') return;
+    console.log();
+    console.log('Switch with:');
+    console.log('  kiroku mode subscription   # OAuth/API + Haiku 4.5 + batch + caching');
+    console.log('  kiroku mode api            # OpenRouter + Qwen 3.6, batch & caching off');
+    return;
+  }
+
+  if (!['subscription', 'api'].includes(sub)) {
+    console.error(`Unknown mode: ${sub}`);
+    console.error('Available: subscription | api | show');
+    process.exit(1);
+  }
+
+  if (sub === 'subscription') {
+    cfg.worker.extraction = {
+      ...oldExt,
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5-20251001',
+      effort: 'medium',
+      temperature: oldExt.temperature ?? 0,
+      maxOutputTokens: 8192,
+      batch: {
+        enabled: true,
+        maxTurnsPerCall: 5,
+        minTurnsPerCall: 3,
+        flushTimeoutMs: 15000,
+        outputTokenBudget: 6000,
+      },
+    };
+    delete cfg.worker.extraction.apiKeyEnv;
+    delete cfg.worker.extraction.baseUrl;
+  } else {
+    cfg.worker.extraction = {
+      ...oldExt,
+      provider: 'openrouter',
+      model: 'qwen/qwen3.6-35b-a3b',
+      apiKeyEnv: 'OPENROUTER_API_KEY',
+      temperature: 0,
+      maxOutputTokens: 2048,
+      batch: { enabled: false },
+    };
+    delete cfg.worker.extraction.effort;
+    delete cfg.worker.extraction.baseUrl;
+  }
+
+  writeFileSync(p.CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n');
+
+  console.log(`Mode set to: ${sub}`);
+  console.log(`  provider: ${cfg.worker.extraction.provider}`);
+  console.log(`  model:    ${cfg.worker.extraction.model}`);
+  console.log(`  batch:    ${cfg.worker.extraction.batch.enabled ? 'on (' + cfg.worker.extraction.batch.maxTurnsPerCall + ' turns/call)' : 'off'}`);
+  console.log();
+  if (sub === 'subscription') {
+    console.log('Required: ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in ~/.kiroku/.env');
+  } else {
+    console.log('Required: OPENROUTER_API_KEY in ~/.kiroku/.env');
+  }
+  console.log('Apply:    kiroku stop && kiroku start');
+}
+
 async function cmdHookOnStop() {
   const p = await paths();
   const workerState = getWorkerState(p);
@@ -1065,6 +1160,7 @@ Commands:
   activate      Activate a license key
   deactivate    Deactivate current license
   license       Show license status
+  mode          Switch worker between subscription / api preset
   hook-on-stop  (Internal) Trigger worker immediate poll via SIGUSR1
 
 Transcript options:
@@ -1082,13 +1178,19 @@ Recording options:
   kiroku play <file>                      Replay a recording
   kiroku recs                             List all recordings
 
+Mode presets:
+  kiroku mode show           # Show current worker config
+  kiroku mode subscription   # OAuth/API + Haiku 4.5 + batch + caching
+  kiroku mode api            # OpenRouter + Qwen 3.6, batch & caching off
+
 Examples:
   kiroku init            # First-time setup
   kiroku start           # Launch with memory enabled
   kiroku status          # Check what's running
   kiroku stop            # Shut everything down
   kiroku export my-proj  # Export project memory
-  kiroku reindex         # Rebuild embeddings after vec table rebuild`);
+  kiroku reindex         # Rebuild embeddings after vec table rebuild
+  kiroku mode api        # Switch to cheap OpenRouter mode`);
 }
 
 // ─── Helpers ──────────────────────────────────────────

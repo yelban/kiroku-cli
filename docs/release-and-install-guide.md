@@ -286,11 +286,11 @@ API Key 反而便宜是因為 worker extraction 真實用量很少（每天可�
 
 > 後續 follow-up：worker 應該偵測 model 是否實際 cache hit，連續幾次 cache_read=0 時自動降 cache_control（避免 cache_creation 浪費）。目前未實作。
 
-### 一鍵切換 mode（1.7.5+）
+### 一鍵切換 mode（1.7.5+，1.7.7 改 Sonnet default、1.7.9 改 Qwen Flash default）
 
 ```bash
-kiroku mode subscription   # OAuth/API + Haiku 4.5 + batch + caching
-kiroku mode api            # OpenRouter + Qwen 3.6 35B A3B, batch & caching off
+kiroku mode subscription   # OAuth/API + Sonnet 4.6 + batch + cache
+kiroku mode api            # OpenRouter + Qwen 3.6 Flash, batch & cache off
 kiroku mode show           # 顯示當前設定
 kiroku stop && kiroku start  # 套用
 ```
@@ -424,7 +424,16 @@ kiroku stop && kiroku start
 }
 ```
 
-8. **API key 必須放 `ANTHROPIC_API_KEY`，不可放 `ANTHROPIC_AUTH_TOKEN`**
+8. **OpenRouter / OpenAI-compatible: thinking models 會回 `content=null`**
+   `callOpenAICompatible` 讀 `choices[0].message.content`，但 reasoning-only 模型把答案放 `message.reasoning`，content 留 null。worker 直接 throw `Empty extraction response`、永遠 retry。
+   實證（2026-05）：
+   - `qwen/qwen3.6-35b-a3b` ❌ reasoning only（content=null）
+   - `qwen/qwen3.6-flash` ✅ content 正常
+   - `qwen/qwen3.6-plus` ✅ content 正常
+   `mode api` preset 預設 Qwen 3.6 Flash 避開這個雷。要用其他 OpenRouter 模型先 `curl` 測一下 `message.content` 不為 null 才能用。
+   要支援 reasoning-only 模型需擴 `callOpenAICompatible` 在 OpenRouter 路徑加 `reasoning: { exclude: true }` 參數（OpenRouter-specific），目前 worker 沒做。
+
+9. **API key 必須放 `ANTHROPIC_API_KEY`，不可放 `ANTHROPIC_AUTH_TOKEN`**
    `anthropic-auth.js` priority 跟 header 對應：
    ```
    priority 1  CLAUDE_CODE_OAUTH_TOKEN  →  Authorization: Bearer ...        OAuth Max only (sk-ant-oat-...)

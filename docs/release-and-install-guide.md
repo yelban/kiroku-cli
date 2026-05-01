@@ -226,7 +226,18 @@ API Key 反而便宜是因為 worker extraction 真實用量很少（每天可�
 
 **重要：`extractBatch` + prompt caching 只 anthropic provider 支援。** 其他 provider 走 `extract()` 單筆 path（filter / throttle / effort 仍生效，但無法享受 ~70% input token 攤銷）。所以 batch+cache 攤銷後的 Haiku 4.5 ($3/月) 很接近單筆的 GPT-5.4 Nano ($1.5/月) 但有 batch 容錯加成。
 
-### Provider 配置選單（按 use case 三選一）
+### 一鍵切換 mode（1.7.5+）
+
+```bash
+kiroku mode subscription   # OAuth/API + Haiku 4.5 + batch + caching
+kiroku mode api            # OpenRouter + Qwen 3.6 35B A3B, batch & caching off
+kiroku mode show           # 顯示當前設定
+kiroku stop && kiroku start  # 套用
+```
+
+`kiroku mode` 會 merge 進 `~/.kiroku/config.json`，只覆寫 `worker.extraction.{provider,model,effort,batch,...}`，保留 fallback config 跟其他自訂欄位。
+
+### 三條 Provider 配置（按 use case）
 
 A. **訂閱 Claude Pro/Max + 多 session 並用** — Haiku 4.5（burst 寬鬆）
 ```json

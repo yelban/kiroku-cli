@@ -525,6 +525,17 @@ kiroku stop && kiroku start
    ```
    1.7.0+ 的正常 stop（SIGTERM）會跑 `rescueBatchBuffer`，把 batch buffer 內未 flush 的 item 搬回 incoming。
 
+10. **Dead-letter 累積無上限（1.7.12 加管理命令）**
+    Worker `maxAttempts` 用完會把 file 移到 `queue/dead-letter/`，當前無自動清理。1885+ 個累積很常見（OAuth 撞 429 → 全部 dead-letter）。1.7.12+ 用：
+    ```bash
+    kiroku dead-letter                        # 看最新 20 筆
+    kiroku dead-letter retry --limit 50       # 重試最新 50 個（會 SIGUSR1 worker）
+    kiroku dead-letter retry all              # 重試全部
+    kiroku dead-letter clear --older-than 7   # 刪 7 天以前（互動 confirm）
+    kiroku dead-letter clear all              # 清空全部（互動 confirm）
+    KIROKU_AUTO_CONFIRM=yes kiroku dead-letter clear --older-than 30   # 腳本用
+    ```
+
 ---
 
 ## 1.7.x 切換驗證紀錄（2026-05-01）
@@ -597,3 +608,4 @@ kiroku stop && kiroku start   # 套用
 | `c9739c8` | 1.7.9 | Fix — mode api default Qwen 3.6 Flash (avoid 35B A3B reasoning-only) |
 | `8302aed` | 1.7.10 | Feat — ratelimit-aware retry + utilization logging (anthropic-ratelimit-unified-* headers) |
 | `e2f656f` | 1.7.11 | Feat — extractBatch supports OpenRouter + OpenAI-compatible (mode api batch on default) |
+| `7febc4c` | 1.7.12 | Feat — `kiroku dead-letter` list/retry/clear subcommand |

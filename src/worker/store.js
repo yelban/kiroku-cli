@@ -411,7 +411,11 @@ function cosineSimilarity(a, b) {
 export async function runCompactionSweep(db, opts = {}) {
   if (!isVecEnabled()) return { merged: 0, conflicts: 0 };
 
-  const yieldEvery = opts.yieldEvery ?? 20;
+  const yieldEveryGroup = opts.yieldEvery ?? 1;       // yield between groups (default: every group)
+  const yieldEveryEmb = opts.yieldEveryEmb ?? 50;     // yield mid-group during embedding loads
+  const yieldEveryPair = opts.yieldEveryPair ?? 200;  // yield mid-group during O(N^2) cosine
+  const tick = () => new Promise(setImmediate);
+
   const now = new Date().toISOString();
   let merged = 0;
   let conflicts = 0;
@@ -427,8 +431,8 @@ export async function runCompactionSweep(db, opts = {}) {
   `).all();
 
   for (const { subject_entity_id } of groups) {
-    if (++groupsProcessed % yieldEvery === 0) {
-      await new Promise(setImmediate);
+    if (++groupsProcessed % yieldEveryGroup === 0) {
+      await tick();
     }
     const facts = db.prepare(`
       SELECT f.id, f.predicate, f.object_text, f.heat, f.base_heat, f.created_at
@@ -437,8 +441,9 @@ export async function runCompactionSweep(db, opts = {}) {
       ORDER BY f.heat DESC
     `).all(subject_entity_id);
 
-    // Load embeddings for this group
+    // Load embeddings for this group (yield mid-stream for large groups)
     const embMap = new Map();
+    let embIdx = 0;
     for (const f of facts) {
       try {
         const row = db.prepare(
@@ -446,10 +451,12 @@ export async function runCompactionSweep(db, opts = {}) {
         ).get(f.id, 'active');
         if (row) embMap.set(f.id, new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4));
       } catch { /* embedding may not exist */ }
+      if (++embIdx % yieldEveryEmb === 0) await tick();
     }
 
     // Greedy merge: anchor = highest heat, cosine > 0.92 = merge
     const archived = new Set();
+    let pairIdx = 0;
     for (let i = 0; i < facts.length; i++) {
       if (archived.has(facts[i].id)) continue;
       const embA = embMap.get(facts[i].id);
@@ -459,6 +466,8 @@ export async function runCompactionSweep(db, opts = {}) {
         if (archived.has(facts[j].id)) continue;
         const embB = embMap.get(facts[j].id);
         if (!embB) continue;
+
+        if (++pairIdx % yieldEveryPair === 0) await tick();
 
         const cosine = cosineSimilarity(embA, embB);
 

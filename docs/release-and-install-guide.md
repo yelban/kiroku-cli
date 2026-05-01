@@ -407,7 +407,21 @@ kiroku stop && kiroku start
 }
 ```
 
-8. **Stuck `processing/` 檔案不會自動回收**
+8. **API key 必須放 `ANTHROPIC_API_KEY`，不可放 `ANTHROPIC_AUTH_TOKEN`**
+   `anthropic-auth.js` priority 跟 header 對應：
+   ```
+   priority 1  CLAUDE_CODE_OAUTH_TOKEN  →  Authorization: Bearer ...        OAuth Max only (sk-ant-oat-...)
+   priority 2  ANTHROPIC_AUTH_TOKEN     →  Authorization: Bearer ...        relay/gateway, 不適合 sk-ant-api03
+   priority 3  ANTHROPIC_API_KEY        →  x-api-key: ...                   API key (sk-ant-api03-...)
+   ```
+   實測：把 `sk-ant-api03-...` 放進 `ANTHROPIC_AUTH_TOKEN` → server 回 `HTTP 401 Invalid bearer token`，因為 Anthropic 嚴格區分兩種 auth header。**API key 一定要放 `ANTHROPIC_API_KEY`**。
+   ```bash
+   echo 'ANTHROPIC_API_KEY=sk-ant-api03-...' >> ~/.kiroku/.env  # ← 對
+   echo 'ANTHROPIC_AUTH_TOKEN=sk-ant-api03-...' >> ~/.kiroku/.env  # ← 錯，會 401
+   ```
+   另外，API key 用之前要先在 [console.anthropic.com / Plans & Billing](https://console.anthropic.com/settings/billing) 儲值，否則 server 回 `HTTP 400 credit balance is too low`。
+
+9. **Stuck `processing/` 檔案不會自動回收（已修，commit `f7a88ff`）**
    worker crash 或被 SIGKILL 後，已 rename 進 `processing/` 的 file 仍留在那、但 `pollQueue` 只掃 `incoming/`，這些孤兒永遠不被處理。緊急救援：
    ```bash
    mv ~/.kiroku/data/queue/processing/*.jsonl ~/.kiroku/data/queue/incoming/

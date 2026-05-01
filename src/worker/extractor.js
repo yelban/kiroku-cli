@@ -9,6 +9,18 @@ import { createBatchStreamParser } from './batch-parser.js';
 
 const log = createLogger('extractor');
 
+// OAuth Max tokens require this exact identifier as the first system block;
+// requests without it return HTTP 429 (anti-abuse, masquerading as rate limit).
+const CLAUDE_CODE_IDENTIFIER = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+function buildAnthropicSystem(promptText, isOAuth) {
+  const block = { type: 'text', text: promptText, cache_control: { type: 'ephemeral' } };
+  if (isOAuth) {
+    return [{ type: 'text', text: CLAUDE_CODE_IDENTIFIER }, block];
+  }
+  return [block];
+}
+
 let _systemPrompt = null;
 let _batchSystemPrompt = null;
 let _getPromptOverride = null;
@@ -67,13 +79,7 @@ async function extractBatchAnthropic(turns, config) {
     model: config.model || 'claude-haiku-4-5-20251001',
     max_tokens: config.maxOutputTokens || 8000,
     stream: true,
-    system: [
-      {
-        type: 'text',
-        text: getBatchSystemPrompt(),
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
+    system: buildAnthropicSystem(getBatchSystemPrompt(), auth.isOAuth),
     messages: [{ role: 'user', content: userMessage }],
   };
   if (config.effort) {
@@ -213,13 +219,7 @@ async function callAnthropic(text, config) {
   const requestBody = {
     model: config.model || 'claude-haiku-4-5-20251001',
     max_tokens: config.maxOutputTokens || 1200,
-    system: [
-      {
-        type: 'text',
-        text: getSystemPrompt(),
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
+    system: buildAnthropicSystem(getSystemPrompt(), auth.isOAuth),
     messages: [
       { role: 'user', content: `Extract knowledge from the following conversation turn:\n\n${text}` },
     ],

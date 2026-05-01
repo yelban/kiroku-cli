@@ -71,7 +71,24 @@ export async function extractBatch(turns, extractionConfig) {
 }
 
 async function extractBatchAnthropic(turns, config) {
-  return await withOauth401Retry(() => extractBatchAnthropicOnce(turns, config));
+  return await withOauth401Retry(() => withEffortFallback((cfg) => extractBatchAnthropicOnce(turns, cfg), config));
+}
+
+// Some Anthropic models (e.g. Haiku 4.5) reject the output_config.effort
+// parameter with HTTP 400. On that specific error, retry once without
+// effort. Other errors propagate.
+async function withEffortFallback(fn, config) {
+  try {
+    return await fn(config);
+  } catch (err) {
+    const msg = err?.message || '';
+    if (config?.effort && /does not support the effort parameter/.test(msg)) {
+      log.info({ model: config.model }, 'model rejects effort parameter — retrying without it');
+      const fallback = { ...config, effort: null };
+      return await fn(fallback);
+    }
+    throw err;
+  }
 }
 
 // Wrap an anthropic call: on HTTP 401, run reconcileOauthToken() once and
@@ -236,7 +253,7 @@ async function callGemini(text, config, apiKey) {
 }
 
 async function callAnthropic(text, config) {
-  return await withOauth401Retry(() => callAnthropicOnce(text, config));
+  return await withOauth401Retry(() => withEffortFallback((cfg) => callAnthropicOnce(text, cfg), config));
 }
 
 async function callAnthropicOnce(text, config) {

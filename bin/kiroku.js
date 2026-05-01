@@ -1084,7 +1084,6 @@ async function cmdMode() {
       ...oldExt,
       provider: 'anthropic',
       model: 'claude-haiku-4-5-20251001',
-      effort: 'medium',
       temperature: oldExt.temperature ?? 0,
       maxOutputTokens: 8192,
       batch: {
@@ -1097,6 +1096,9 @@ async function cmdMode() {
     };
     delete cfg.worker.extraction.apiKeyEnv;
     delete cfg.worker.extraction.baseUrl;
+    // Haiku 4.5 doesn't accept output_config.effort; only set effort if user
+    // overrides the model to a Sonnet/Opus variant manually afterward.
+    delete cfg.worker.extraction.effort;
   } else {
     cfg.worker.extraction = {
       ...oldExt,

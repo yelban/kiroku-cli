@@ -6,6 +6,7 @@ import { KIROKU_ROOT } from '../shared/paths.js';
 import { createLogger } from '../shared/logger.js';
 import { resolveAnthropicAuth, buildAuthHeaders, reconcileOauthToken } from './anthropic-auth.js';
 import { createBatchStreamParser } from './batch-parser.js';
+import { recordUsage as recordCacheUsage, shouldUseCacheControl, getCacheHealth } from './cache-health.js';
 import EMBEDDED_BATCH_PROMPT from '../../prompts/extraction-batch.md';
 
 const log = createLogger('extractor');
@@ -14,8 +15,10 @@ const log = createLogger('extractor');
 // requests without it return HTTP 429 (anti-abuse, masquerading as rate limit).
 const CLAUDE_CODE_IDENTIFIER = "You are Claude Code, Anthropic's official CLI for Claude.";
 
-function buildAnthropicSystem(promptText, isOAuth) {
-  const block = { type: 'text', text: promptText, cache_control: { type: 'ephemeral' } };
+function buildAnthropicSystem(promptText, isOAuth, useCacheControl = true) {
+  const block = useCacheControl
+    ? { type: 'text', text: promptText, cache_control: { type: 'ephemeral' } }
+    : { type: 'text', text: promptText };
   if (isOAuth) {
     return [{ type: 'text', text: CLAUDE_CODE_IDENTIFIER }, block];
   }
@@ -113,11 +116,13 @@ async function extractBatchAnthropicOnce(turns, config) {
     `===TURN_${idx}===\n${t.text}\n===TURN_${idx}_END_INPUT===`
   ).join('\n\n');
 
+  const model = config.model || 'claude-haiku-4-5-20251001';
+  const useCache = shouldUseCacheControl(model);
   const requestBody = {
-    model: config.model || 'claude-haiku-4-5-20251001',
+    model,
     max_tokens: config.maxOutputTokens || 8000,
     stream: true,
-    system: buildAnthropicSystem(getBatchSystemPrompt(), auth.isOAuth),
+    system: buildAnthropicSystem(getBatchSystemPrompt(), auth.isOAuth, useCache),
     messages: [{ role: 'user', content: userMessage }],
   };
   if (config.effort) {
@@ -146,6 +151,8 @@ async function extractBatchAnthropicOnce(turns, config) {
 
   const result = parser.finalize();
   const u = result.usage || {};
+  recordCacheUsage(model, u);
+  const health = getCacheHealth(model);
   log.info({
     cache_creation: u.cache_creation_input_tokens || 0,
     cache_read: u.cache_read_input_tokens || 0,
@@ -155,7 +162,12 @@ async function extractBatchAnthropicOnce(turns, config) {
     requested: turns.length,
     completed: result.completedTurns.length,
     errors: result.errors.length,
+    cache_status: health?.status,
+    cache_disabled: !useCache,
   }, 'batch extraction usage');
+  if (health?.status === 'broken' && useCache) {
+    log.warn({ model, creations: health.creations, reads: health.reads }, 'prompt cache appears broken on this model — disabling cache_control for subsequent calls (24h cooldown)');
+  }
   return result;
 }
 
@@ -258,10 +270,12 @@ async function callAnthropic(text, config) {
 
 async function callAnthropicOnce(text, config) {
   const auth = await resolveAnthropicAuth(config);
+  const model = config.model || 'claude-haiku-4-5-20251001';
+  const useCache = shouldUseCacheControl(model);
   const requestBody = {
-    model: config.model || 'claude-haiku-4-5-20251001',
+    model,
     max_tokens: config.maxOutputTokens || 1200,
-    system: buildAnthropicSystem(getSystemPrompt(), auth.isOAuth),
+    system: buildAnthropicSystem(getSystemPrompt(), auth.isOAuth, useCache),
     messages: [
       { role: 'user', content: `Extract knowledge from the following conversation turn:\n\n${text}` },
     ],
@@ -288,13 +302,20 @@ async function callAnthropicOnce(text, config) {
 
   const response = JSON.parse(data);
   const u = response.usage || {};
-  if (u.cache_creation_input_tokens || u.cache_read_input_tokens) {
+  recordCacheUsage(model, u);
+  const health = getCacheHealth(model);
+  if (useCache || u.cache_creation_input_tokens || u.cache_read_input_tokens) {
     log.info({
       cache_creation: u.cache_creation_input_tokens || 0,
       cache_read: u.cache_read_input_tokens || 0,
       input: u.input_tokens || 0,
       output: u.output_tokens || 0,
+      cache_status: health?.status,
+      cache_disabled: !useCache,
     }, 'extraction usage');
+  }
+  if (health?.status === 'broken' && useCache) {
+    log.warn({ model, creations: health.creations, reads: health.reads }, 'prompt cache appears broken on this model — disabling cache_control for subsequent calls (24h cooldown)');
   }
   const content = response.content?.[0]?.text;
   if (!content) throw new Error('Empty Anthropic response');

@@ -525,7 +525,18 @@ kiroku stop && kiroku start
    ```
    1.7.0+ 的正常 stop（SIGTERM）會跑 `rescueBatchBuffer`，把 batch buffer 內未 flush 的 item 搬回 incoming。
 
-10. **Dead-letter 累積無上限（1.7.12 加管理命令）**
+10. **Worker 不會主動讓 quota 給 chat（1.7.14 加 adaptive throttle）**
+    1.7.10 撞 429 後才 ratelimit-aware backoff，但工人會一路 push 到撞牆才減速。期間使用者前景對話可能撞 429。
+    1.7.14+ `worker.throttle.adaptive: true`（預設）讀每筆 anthropic response 的 utilization：
+    - 任一 window util ≥ 80% → worker rate 降到 50%（20→10/min）
+    - 任一 window util ≥ 95% → 降到 25%（20→5/min）
+    - 5 分鐘無新 ratelimit 資料就回升原速
+    對「7d quota 已經 60%、想留給最後一週 chat 用」場景尤其有用。要關：
+    ```json
+    "worker": { "throttle": { "adaptive": false } }
+    ```
+
+11. **Dead-letter 累積無上限（1.7.12 加管理命令）**
     Worker `maxAttempts` 用完會把 file 移到 `queue/dead-letter/`，當前無自動清理。1885+ 個累積很常見（OAuth 撞 429 → 全部 dead-letter）。1.7.12+ 用：
     ```bash
     kiroku dead-letter                        # 看最新 20 筆
@@ -610,3 +621,4 @@ kiroku stop && kiroku start   # 套用
 | `e2f656f` | 1.7.11 | Feat — extractBatch supports OpenRouter + OpenAI-compatible (mode api batch on default) |
 | `7febc4c` | 1.7.12 | Feat — `kiroku dead-letter` list/retry/clear subcommand |
 | `5c614cc` | 1.7.13 | Feat — `kiroku status` shows mode + cache + ratelimit utilization |
+| `eea1fc3` | 1.7.14 | Feat — adaptive throttle (auto-throttle when ratelimit utilization > 80% / > 95%) |

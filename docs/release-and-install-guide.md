@@ -154,22 +154,44 @@ tail -f ~/.kiroku/logs/worker.log    | grep -E 'turn skipped by filter|throttled
 2. **OAuth Max token 必須宣告 Claude Code 身分**
    `system` 第一塊必須是字串 `"You are Claude Code, Anthropic's official CLI for Claude."`，否則 server 回 HTTP 429 偽裝成 `rate_limit_error`。`buildAnthropicSystem()`（commit `ce993c2`）已在 `auth.isOAuth=true` 時自動前置這個 block，extraction prompt 仍保留 ephemeral cache_control。
 
-3. **`~/.kiroku/.env` 的 token 跟 Keychain 不一致**
-   `resolveAnthropicAuth` 優先序：env > Keychain。換帳號或 Claude Code session 重登後，`.env` 不會自動跟 Keychain 同步，會持續用舊 token 撞 quota。重灌時記得把 .env 重抓一次（場景 C 步驟 4）。
+3. **`~/.kiroku/.env` 的 token 跟 Keychain 不一致（已自動修復，1.7.3+）**
+   `resolveAnthropicAuth` 優先序：env > Keychain。Claude Code session 重啟會 rotate OAuth access token，`.env` 不會自動跟 Keychain 同步——舊版會持續用舊 token 撞 HTTP 401。
+   `reconcileOauthToken()`（commit `ccf3f04`）在 `startWorker()` 開頭跑：偵測 macOS Keychain 的 `Claude Code-credentials` 跟 `process.env.CLAUDE_CODE_OAUTH_TOKEN` 不一致時，自動把 Keychain token promote 進 process.env（`.env` 檔案不動）。warning 寫到 `~/.kiroku/logs/anthropic-auth.log`：
+   ```
+   env OAuth token differs from Keychain — promoting Keychain
+   envTail=...XXXXXXXX  keychainTail=...YYYYYYYY
+   ```
+   非 macOS 機器或 Keychain 也過期 → 仍維持 env 值，需手動同步。
 
-4. **首次重啟 worker 要等 ~110 秒**
-   啟動序列含 initial decay + compaction sweep，掃 22k+ done 紀錄。`worker started` log 出現後才會 poll incoming。
+4. **Initial decay + compaction sweep 阻塞 pollQueue（已修復，1.7.1 + 1.7.2）**
+   早期版本同步跑 sweep，47k facts × O(N²) cosine compare + per-fact embedding SELECT 會吃 8-15 分鐘，期間 incoming 不會被處理、`SIGUSR1` 也不被回應。
+   - 1.7.1（`b2c3628`）：`setImmediate` 包 initial sweep，`worker started` log 立刻出現
+   - 1.7.2（`9c3f041`）：`runCompactionSweep` 改 async，三層 yield（`yieldEveryGroup=1` / `yieldEveryEmb=50` / `yieldEveryPair=200`），sweep 跑時 batch HTTP / pollTimer / signal handler 都能並行
 
 5. **`extractBatch` 只支援 `provider=anthropic`**
    其他 provider 自動 fallback 到單筆 `extract()` 路徑。要 OpenRouter / Gemini 也走 batch 需擴充 `extractor.js`。
+
+6. **舊 worker 在 sync block 中對 `SIGTERM` 無回應**
+   1.7.0 worker 卡 sweep 時 event loop 鎖死，`kiroku stop` 發 SIGTERM 也不退。要 `kill -KILL <pid>` 才能殺。1.7.2+ 因 sweep 改 async + yield，SIGTERM handler 會在下一輪 yield 觸發、能正常退出。
+
+7. **Stuck `processing/` 檔案不會自動回收**
+   worker crash 或被 SIGKILL 後，已 rename 進 `processing/` 的 file 仍留在那、但 `pollQueue` 只掃 `incoming/`，這些孤兒永遠不被處理。緊急救援：
+   ```bash
+   mv ~/.kiroku/data/queue/processing/*.jsonl ~/.kiroku/data/queue/incoming/
+   ```
+   1.7.0+ 的正常 stop（SIGTERM）會跑 `rescueBatchBuffer`，把 batch buffer 內未 flush 的 item 搬回 incoming。
 
 ---
 
 ## 相關 commit
 
-| Commit | 內容 |
-|---|---|
-| `75f62de` | Phase 1 — filter + throttle + medium effort |
-| `6470147` | Phase 2 — adaptive batch + streaming recovery |
-| `b9bef84` | Hotfix — drop invalid `extended-output-2025-02-19` beta |
-| `ce993c2` | Hotfix — Claude Code identifier block under OAuth |
+| Commit | 版本 | 內容 |
+|---|---|---|
+| `75f62de` | 1.7.0 | Phase 1 — filter + throttle + medium effort |
+| `6470147` | 1.7.0 | Phase 2 — adaptive batch + streaming recovery |
+| `b9bef84` | 1.7.0 | Hotfix — drop invalid `extended-output-2025-02-19` beta |
+| `ce993c2` | 1.7.0 | Hotfix — Claude Code identifier block under OAuth |
+| `63c160c` | 1.7.0 | Fix — embed batch prompt into bundle (npm tarball 不含 prompts/) |
+| `b2c3628` | 1.7.1 | Fix — defer initial sweep + yield event loop |
+| `9c3f041` | 1.7.2 | Fix — finer-grained yields in compaction sweep |
+| `ccf3f04` | 1.7.3 | Feat — auto-reconcile env OAuth token vs Keychain |

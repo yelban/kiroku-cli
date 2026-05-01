@@ -1033,8 +1033,8 @@ async function cmdLicense() {
 }
 
 function detectMode(ext) {
-  if (ext.provider === 'anthropic' && ext.batch?.enabled && /haiku/i.test(ext.model || '')) {
-    return 'subscription (OAuth/API + Haiku 4.5 + batch)';
+  if (ext.provider === 'anthropic' && ext.batch?.enabled && /sonnet/i.test(ext.model || '')) {
+    return 'subscription (OAuth/API + Sonnet 4.6 + batch + cache)';
   }
   if (ext.provider === 'anthropic' && ext.batch?.enabled) {
     return `subscription (Anthropic / ${ext.model} + batch)`;
@@ -1068,8 +1068,8 @@ async function cmdMode() {
     if (sub === 'show') return;
     console.log();
     console.log('Switch with:');
-    console.log('  kiroku mode subscription   # OAuth/API + Haiku 4.5 + batch + caching');
-    console.log('  kiroku mode api            # OpenRouter + Qwen 3.6, batch & caching off');
+    console.log('  kiroku mode subscription   # OAuth/API + Sonnet 4.6 + batch + cache');
+    console.log('  kiroku mode api            # OpenRouter + Qwen 3.6, batch & cache off');
     return;
   }
 
@@ -1083,7 +1083,8 @@ async function cmdMode() {
     cfg.worker.extraction = {
       ...oldExt,
       provider: 'anthropic',
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-sonnet-4-6',
+      effort: 'medium',
       temperature: oldExt.temperature ?? 0,
       maxOutputTokens: 8192,
       batch: {
@@ -1096,9 +1097,12 @@ async function cmdMode() {
     };
     delete cfg.worker.extraction.apiKeyEnv;
     delete cfg.worker.extraction.baseUrl;
-    // Haiku 4.5 doesn't accept output_config.effort; only set effort if user
-    // overrides the model to a Sonnet/Opus variant manually afterward.
-    delete cfg.worker.extraction.effort;
+    // Sonnet 4.6 supports output_config.effort + prompt caching natively.
+    // Haiku 4.5 was previously the default but its prompt caching is
+    // platform-broken (cache_create + cache_read both 0 across OAuth and
+    // API key paths), making it ~38% more expensive than Sonnet at the
+    // same workload. Single-flight worker (one batch flush at a time)
+    // does not hit Sonnet's burst limit of <=2.
   } else {
     cfg.worker.extraction = {
       ...oldExt,
@@ -1182,8 +1186,8 @@ Recording options:
 
 Mode presets:
   kiroku mode show           # Show current worker config
-  kiroku mode subscription   # OAuth/API + Haiku 4.5 + batch + caching
-  kiroku mode api            # OpenRouter + Qwen 3.6, batch & caching off
+  kiroku mode subscription   # OAuth/API + Sonnet 4.6 + batch + cache
+  kiroku mode api            # OpenRouter + Qwen 3.6, batch & cache off
 
 Examples:
   kiroku init            # First-time setup

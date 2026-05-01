@@ -4,7 +4,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { KIROKU_ROOT } from '../shared/paths.js';
 import { createLogger } from '../shared/logger.js';
-import { resolveAnthropicAuth, buildAuthHeaders } from './anthropic-auth.js';
+import { resolveAnthropicAuth, buildAuthHeaders, reconcileOauthToken } from './anthropic-auth.js';
 import { createBatchStreamParser } from './batch-parser.js';
 import EMBEDDED_BATCH_PROMPT from '../../prompts/extraction-batch.md';
 
@@ -71,6 +71,25 @@ export async function extractBatch(turns, extractionConfig) {
 }
 
 async function extractBatchAnthropic(turns, config) {
+  return await withOauth401Retry(() => extractBatchAnthropicOnce(turns, config));
+}
+
+// Wrap an anthropic call: on HTTP 401, run reconcileOauthToken() once and
+// retry. Covers the case where Claude Code rotated its OAuth token mid-session
+// after the worker had already cached the old one.
+async function withOauth401Retry(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (typeof err?.message === 'string' && err.message.startsWith('HTTP 401') && reconcileOauthToken()) {
+      log.info('HTTP 401 → reconciled OAuth token, retrying once');
+      return await fn();
+    }
+    throw err;
+  }
+}
+
+async function extractBatchAnthropicOnce(turns, config) {
   const auth = await resolveAnthropicAuth(config);
 
   const userMessage = turns.map((t, idx) =>
@@ -217,6 +236,10 @@ async function callGemini(text, config, apiKey) {
 }
 
 async function callAnthropic(text, config) {
+  return await withOauth401Retry(() => callAnthropicOnce(text, config));
+}
+
+async function callAnthropicOnce(text, config) {
   const auth = await resolveAnthropicAuth(config);
   const requestBody = {
     model: config.model || 'claude-haiku-4-5-20251001',

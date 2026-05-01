@@ -20,6 +20,7 @@ const log = createLogger('worker');
 let running = false;
 let pollTimer = null;
 let decayTimer = null;
+let reconcileTimer = null;
 let _licenseState = null;
 let _dailyExtractCount = 0;
 let _dailyExtractDate = '';
@@ -88,6 +89,13 @@ export async function startWorker() {
   // Start polling
   const pollInterval = config.worker.pollIntervalMs;
   pollTimer = setInterval(() => pollQueue(config), pollInterval);
+
+  // Re-check OAuth token vs Keychain every 5 minutes to catch silent rotation
+  // by Claude Code sessions while the worker is running.
+  reconcileTimer = setInterval(() => {
+    try { reconcileOauthToken(); } catch (err) { log.warn({ err: err.message }, 'periodic reconcile failed'); }
+  }, 5 * 60 * 1000);
+
   log.info({ pollInterval }, 'worker started');
 
   // Also poll immediately
@@ -495,6 +503,10 @@ export function stopWorker() {
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
+  }
+  if (reconcileTimer) {
+    clearInterval(reconcileTimer);
+    reconcileTimer = null;
   }
   if (_batchTimer) {
     clearTimeout(_batchTimer);

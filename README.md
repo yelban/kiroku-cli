@@ -243,6 +243,7 @@ Because routing is keyed on the credential the request actually carries, **multi
 - [Quickstart Guide](docs/quickstart.md) — Full installation and usage instructions
 - [Conversation Logging](docs/conversation-logging.md) — Real-time markdown logging + transcript converter
 - [Extraction Cost & Extensibility](docs/extraction-cost-and-extensibility.md) — Worker cost model, provider selection, multi-client extension feasibility
+- [Extraction Optimization Strategies](docs/extraction-optimization-strategies.md) — Filter / batch / throttle / defer analysis, combination evaluation, phased rollout plan
 - [PRD](docs/kiroku-v15-prd.md) — Product requirements document
 - [CHANGELOG](CHANGELOG.md) — Detailed change log
 - [ADR-001: CJK Text Search](docs/adr-001-cjk-text-search.md) — Chinese word segmentation strategy

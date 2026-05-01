@@ -181,7 +181,7 @@ describe('runCompactionSweep', () => {
     const db = createTestDb();
     // vec is not enabled in test (no sqlite-vec loaded)
     const { runCompactionSweep } = await import('../../src/worker/store.js');
-    const result = runCompactionSweep(db);
+    const result = await runCompactionSweep(db);
     expect(result).toEqual({ merged: 0, conflicts: 0 });
   });
 });

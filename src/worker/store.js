@@ -408,12 +408,14 @@ function cosineSimilarity(a, b) {
   return dot; // vectors are normalized, so dot product = cosine
 }
 
-export function runCompactionSweep(db) {
+export async function runCompactionSweep(db, opts = {}) {
   if (!isVecEnabled()) return { merged: 0, conflicts: 0 };
 
+  const yieldEvery = opts.yieldEvery ?? 20;
   const now = new Date().toISOString();
   let merged = 0;
   let conflicts = 0;
+  let groupsProcessed = 0;
 
   // Group by subject_entity_id with >1 active fact
   const groups = db.prepare(`
@@ -425,6 +427,9 @@ export function runCompactionSweep(db) {
   `).all();
 
   for (const { subject_entity_id } of groups) {
+    if (++groupsProcessed % yieldEvery === 0) {
+      await new Promise(setImmediate);
+    }
     const facts = db.prepare(`
       SELECT f.id, f.predicate, f.object_text, f.heat, f.base_heat, f.created_at
       FROM facts f

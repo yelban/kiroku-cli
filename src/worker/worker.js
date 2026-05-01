@@ -68,14 +68,17 @@ export async function startWorker() {
     startedAt: new Date().toISOString(),
   }));
 
-  // Run initial decay + compaction sweep
+  // Run sweeps in the background — initial + periodic. Compaction yields the
+  // event loop every N groups (see runCompactionSweep), so pollQueue can run
+  // concurrently. Decay sweep is fast enough to stay synchronous.
   if (config.worker.decay.enabled) {
-    try { runDecaySweep(config); } catch (err) { log.warn({ err: err.message }, 'initial decay sweep failed'); }
-    try { runCompactionSweep(db); } catch (err) { log.warn({ err: err.message }, 'initial compaction sweep failed'); }
-    decayTimer = setInterval(() => {
+    const runSweeps = async () => {
       try { runDecaySweep(config); } catch (err) { log.warn({ err: err.message }, 'decay sweep failed'); }
-      try { runCompactionSweep(db); } catch (err) { log.warn({ err: err.message }, 'compaction sweep failed'); }
-    }, config.worker.decay.sweepIntervalMs);
+      try { await runCompactionSweep(db); } catch (err) { log.warn({ err: err.message }, 'compaction sweep failed'); }
+    };
+    // Defer initial sweep to next tick so worker starts polling immediately.
+    setImmediate(() => { runSweeps(); });
+    decayTimer = setInterval(() => { runSweeps(); }, config.worker.decay.sweepIntervalMs);
   }
 
   // Start polling

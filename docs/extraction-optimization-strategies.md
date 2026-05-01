@@ -249,6 +249,144 @@ metadata: { effort: 'medium' }
 | 6 | Defer + 互動 session 暫停 | 解決並行衝突 | 2 天 | 中 |
 | 7 | Token budget tracker | 安全網 | 1-2 天 | 低 |
 
+## Part 5：Batch Output Token 暴增問題與解法
+
+Part 1.2 提到 Batch N=10 會導致 output tokens 暴增到 15k+，超過 Sonnet 預設 8k 上限。本節探討 5 種**設計層面**的避免方法。
+
+### 5.1 五個解法
+
+#### 方案 A：Adaptive Batch Size（自適應批量）
+
+根據 input 長度動態決定 N，控制預期 output 在安全範圍。
+
+```
+每 turn 估計 output ≈ 1k tokens
+保留 buffer 到 6k（25% 安全邊界）
+N = floor(6000 / avg_output_per_turn)
+
+短 turn（< 500 input）→ N=15-20
+中 turn（500-2k input）→ N=8-10
+長 turn（> 2k input）→ N=3-5
+```
+
+| 優點 | 缺點 |
+|------|------|
+| 可預期、無需 beta header | 需估算邏輯，初期可能不準 |
+| 相容性好 | 需追蹤 input 長度分佈 |
+
+#### 方案 B：Delimiter + Streaming Recovery（分隔符串流恢復）
+
+用 SSE 串流接收 output，每個 turn 結尾有明確標記，截斷時保留已完成的部分。
+
+Prompt 設計：
+```
+為每個 TURN 輸出獨立 JSON，用 ===TURN_N_END=== 標記結束。
+範例：
+{"turn_index": 0, "entities": [...], "facts": [...]}
+===TURN_0_END===
+{"turn_index": 1, "entities": [...], "facts": [...]}
+===TURN_1_END===
+```
+
+Worker 解析流程：
+1. 串流讀取 chunks
+2. 每收到 `===TURN_N_END===` 就解析該 turn 並寫入 DB
+3. 若截斷，**只有最後一個未完成的 turn 失敗**，前面 N-1 個已落地
+4. 失敗的 1 個 turn 單獨重試
+
+| 優點 | 缺點 |
+|------|------|
+| 截斷只損失 1 筆而非整批 | 實作較複雜（SSE parser）|
+| Progressive write | Worker 要支援串流 |
+
+#### 方案 C：Minified Output Schema（壓縮輸出 schema）
+
+短 key + 省略可選欄位，讓每 turn 的 output 縮水 30-50%。
+
+```diff
+- {"canonical_name":"PostgreSQL","entity_type":"topic","aliases":[]}
++ {"n":"PostgreSQL","t":"topic"}
+
+- {"subject":"PostgreSQL","predicate":"is used as","object":"database","fact_type":"semantic","confidence":1.0,"scope":"project"}
++ {"s":"PostgreSQL","p":"is used as","o":"database","ft":"semantic","c":1,"sc":"p"}
+```
+
+Worker 收到後 post-process 還原成完整格式存 DB。
+
+| 優點 | 缺點 |
+|------|------|
+| 每 turn output 從 ~1k → ~600 tokens | 需訓練模型用短 key |
+| 結合 batch 後 N=10 從 15k → 9k | 可能降低 JSON 成功率 |
+
+#### 方案 D：Tool Use 模式（最穩健）
+
+用 Anthropic tool calling，每個 turn 的結果是一次 tool call。
+
+Prompt 設計：
+```
+你有 store_extraction(turn_index, entities, facts) tool。
+依序處理每個 turn，每個都呼叫一次 tool 儲存結果。
+```
+
+執行流程：
+1. 模型輸出 tool_use block 1（turn 0 結果）
+2. 假裝執行（tool_result: ok），繼續
+3. 模型輸出 tool_use block 2（turn 1 結果）
+4. ...直到全部完成
+
+| 優點 | 缺點 |
+|------|------|
+| 每 turn 獨立 tool call，截斷只損失最後一個 | Output tokens 略增（tool call overhead）|
+| Tool 結構化輸出比 raw JSON 穩定 | 需 multi-turn tool use 設計 |
+| 可串流即時 parse 每個 tool_use | Prompt 設計更複雜 |
+| Anthropic 對 tool calling 解析最佳 | — |
+
+#### 方案 E：Extended Output Beta（最簡單）
+
+加 `anthropic-beta: extended-output-2025-02-19` header，Sonnet output 上限從 8k → 64k。
+
+```js
+headers: {
+  'anthropic-beta': 'prompt-caching-2024-07-31,extended-output-2025-02-19,...'
+}
+```
+
+| 優點 | 缺點 |
+|------|------|
+| 1 行改動就解決 | 治標不治本 |
+| 解決 99% 截斷問題 | 大 batch 失敗仍整批重試 |
+
+### 5.2 推薦組合（從最務實到最穩健）
+
+| Level | 組合 | 工時 | 適用場景 |
+|-------|------|------|---------|
+| **Level 1：Quick Win** | E（extended output）| 1 行 | 試水溫，先看效果 |
+| **Level 2：Production** | A + E | 1-2 天 | 一般生產環境 |
+| **Level 3：Robust** | A + B + E | 3-5 天 | 高量級積壓處理 |
+| **Level 4：Bulletproof** | A + D | 5-7 天 | 關鍵任務，零容忍丟失 |
+
+### 5.3 Phase 2 推薦設計
+
+若決定做 Batch（Phase 2），建議走 **Level 3（A+B+E）**：
+
+| 元件 | 實作策略 |
+|------|---------|
+| Adaptive sizing | 根據 input tokens 估算，N=3-15 動態 |
+| Streaming parser | SSE chunks 即時解析，分隔符切分 |
+| Recovery | 每完成一個 turn 立刻寫 DB，失敗只重試最後一個 |
+| Beta header | `extended-output-2025-02-19`（雙保險）|
+
+這個組合的 batch **失敗代價接近單筆 retry**——不會放大錯誤，也維持 batch 的攤提效益。
+
+### 5.4 為什麼不直接用方案 D（Tool Use）
+
+Tool Use 雖然最穩健，但對 worker 架構改動較大：
+- 需要 multi-turn 對話流（每個 tool_use 後要 reply tool_result）
+- 增加 ~3 倍 message 數量（user → tool_use → tool_result → tool_use → ...）
+- 需要 tool schema 定義 + validation
+
+對 v15 worker 的單一 request-response 設計來說，Level 3 是更合適的折衷。Tool Use 適合未來重構為「agent-style worker」時採用。
+
 ## 相關文件
 
 - [extraction-cost-and-extensibility.md](./extraction-cost-and-extensibility.md) — Worker 成本基線、provider 選擇、多 client 擴展可行性

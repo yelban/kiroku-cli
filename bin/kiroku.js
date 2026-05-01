@@ -2,7 +2,7 @@
 
 import { spawn, execSync } from 'node:child_process';
 import http from 'node:http';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, chmodSync, mkdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync, chmodSync, mkdirSync, statSync, renameSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -54,6 +54,7 @@ const COMMANDS = {
   play: cmdPlay,
   recs: cmdRecs,
   mode: cmdMode,
+  'dead-letter': cmdDeadLetter,
   'hook-on-stop': cmdHookOnStop,
   help: cmdHelp,
 };
@@ -1146,6 +1147,140 @@ async function cmdMode() {
   console.log('Apply:    kiroku stop && kiroku start');
 }
 
+async function cmdDeadLetter() {
+  const p = await paths();
+  const sub = args[0] || 'list';
+  const dlPath = p.QUEUE_DEAD;
+
+  if (!existsSync(dlPath)) {
+    console.log('Dead-letter directory does not exist yet.');
+    return;
+  }
+
+  const all = () => readdirSync(dlPath).filter(f => f.endsWith('.jsonl') && !f.startsWith('.'));
+
+  if (sub === 'list' || sub === 'show') {
+    const files = all();
+    if (files.length === 0) {
+      console.log('Dead-letter is empty.');
+      return;
+    }
+    const limit = parseInt(args[1] || '20', 10);
+    const sorted = files.map(f => {
+      const stat = statSync(join(dlPath, f));
+      return { name: f, mtime: stat.mtime, size: stat.size };
+    }).sort((a, b) => b.mtime - a.mtime);
+
+    console.log(`Total: ${files.length}`);
+    console.log(`Showing latest ${Math.min(limit, files.length)} (use 'kiroku dead-letter list <N>' to change):`);
+    for (const f of sorted.slice(0, limit)) {
+      const ts = f.mtime.toISOString().slice(0, 19).replace('T', ' ');
+      console.log(`  ${ts}  ${String(f.size).padStart(5)}B  ${f.name}`);
+    }
+    return;
+  }
+
+  if (sub === 'retry') {
+    const target = args[1];
+    let toMove = [];
+    if (target === 'all') {
+      toMove = all();
+    } else if (target === '--limit') {
+      const n = parseInt(args[2] || '10', 10);
+      toMove = all()
+        .map(f => ({ name: f, mtime: statSync(join(dlPath, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime)
+        .slice(0, n)
+        .map(o => o.name);
+    } else if (target && target.endsWith('.jsonl')) {
+      if (existsSync(join(dlPath, target))) toMove = [target];
+      else { console.error(`File not found in dead-letter: ${target}`); process.exit(1); }
+    } else {
+      console.error('Usage: kiroku dead-letter retry <all | <filename>.jsonl | --limit N>');
+      process.exit(1);
+    }
+
+    if (toMove.length === 0) {
+      console.log('Nothing to retry.');
+      return;
+    }
+
+    let moved = 0;
+    for (const f of toMove) {
+      try {
+        renameSync(join(dlPath, f), join(p.QUEUE_INCOMING, f));
+        moved++;
+      } catch (e) {
+        console.warn(`failed: ${f} (${e.message})`);
+      }
+    }
+    console.log(`Moved ${moved}/${toMove.length} dead-letter file(s) back to incoming.`);
+    const ws = getWorkerState(p);
+    if (ws?.pid) {
+      try {
+        process.kill(ws.pid, 'SIGUSR1');
+        console.log(`Sent SIGUSR1 to worker (PID ${ws.pid}) for immediate poll.`);
+      } catch {
+        console.log('Worker not running. Files will be picked up on next start.');
+      }
+    } else {
+      console.log('Worker not running. Files will be picked up on next start.');
+    }
+    return;
+  }
+
+  if (sub === 'clear') {
+    const target = args[1];
+    let toDelete = [];
+    if (target === 'all') {
+      toDelete = all();
+    } else if (target === '--older-than') {
+      const days = parseInt(args[2] || '7', 10);
+      const cutoff = Date.now() - days * 86400 * 1000;
+      toDelete = all().filter(f => statSync(join(dlPath, f)).mtimeMs < cutoff);
+    } else {
+      console.error('Usage: kiroku dead-letter clear <all | --older-than <days>>');
+      process.exit(1);
+    }
+
+    if (toDelete.length === 0) {
+      console.log('Nothing to clear.');
+      return;
+    }
+
+    if (process.env.KIROKU_AUTO_CONFIRM !== 'yes') {
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const ans = await new Promise(res => rl.question(
+        `Delete ${toDelete.length} dead-letter file(s)? Type 'yes' to confirm: `,
+        a => { rl.close(); res(a); }
+      ));
+      if (ans.trim().toLowerCase() !== 'yes') {
+        console.log('Cancelled.');
+        return;
+      }
+    }
+
+    let deleted = 0;
+    for (const f of toDelete) {
+      try { unlinkSync(join(dlPath, f)); deleted++; }
+      catch (e) { console.warn(`failed: ${f} (${e.message})`); }
+    }
+    console.log(`Deleted ${deleted}/${toDelete.length} dead-letter file(s).`);
+    return;
+  }
+
+  console.error(`Unknown subcommand: ${sub}`);
+  console.error('Usage:');
+  console.error('  kiroku dead-letter [list]                   # show latest 20');
+  console.error('  kiroku dead-letter list <N>                  # show latest N');
+  console.error('  kiroku dead-letter retry all                 # all → incoming');
+  console.error('  kiroku dead-letter retry --limit <N>         # newest N → incoming');
+  console.error('  kiroku dead-letter retry <filename>.jsonl    # specific file');
+  console.error('  kiroku dead-letter clear all                 # delete all (asks confirm)');
+  console.error('  kiroku dead-letter clear --older-than <days> # delete old (asks confirm)');
+  process.exit(1);
+}
+
 async function cmdHookOnStop() {
   const p = await paths();
   const workerState = getWorkerState(p);
@@ -1181,6 +1316,7 @@ Commands:
   deactivate    Deactivate current license
   license       Show license status
   mode          Switch worker between subscription / api preset
+  dead-letter   List / retry / clear failed extraction files
   hook-on-stop  (Internal) Trigger worker immediate poll via SIGUSR1
 
 Transcript options:
@@ -1201,7 +1337,16 @@ Recording options:
 Mode presets:
   kiroku mode show           # Show current worker config
   kiroku mode subscription   # OAuth/API + Sonnet 4.6 + batch + cache
-  kiroku mode api            # OpenRouter + Qwen 3.6 Flash, batch & cache off
+  kiroku mode api            # OpenRouter + Qwen 3.6 Flash, batch on (1.7.11+)
+
+Dead-letter management:
+  kiroku dead-letter                          # list latest 20
+  kiroku dead-letter list <N>                 # list latest N
+  kiroku dead-letter retry all                # retry all
+  kiroku dead-letter retry --limit <N>        # retry newest N
+  kiroku dead-letter retry <filename>.jsonl   # retry specific file
+  kiroku dead-letter clear all                # delete all (confirm)
+  kiroku dead-letter clear --older-than <N>   # delete files older than N days
 
 Examples:
   kiroku init            # First-time setup

@@ -183,8 +183,8 @@ tail -f ~/.kiroku/logs/worker.log    | grep -E 'turn skipped by filter|throttled
    - 1.7.1（`b2c3628`）：`setImmediate` 包 initial sweep，`worker started` log 立刻出現
    - 1.7.2（`9c3f041`）：`runCompactionSweep` 改 async，三層 yield（`yieldEveryGroup=1` / `yieldEveryEmb=50` / `yieldEveryPair=200`），sweep 跑時 batch HTTP / pollTimer / signal handler 都能並行
 
-5. **`extractBatch` 只支援 `provider=anthropic`**
-   其他 provider 自動 fallback 到單筆 `extract()` 路徑。要 OpenRouter / Gemini 也走 batch 需擴充 `extractor.js`。
+5. **~~`extractBatch` 只支援 `provider=anthropic`~~（已修，1.7.11 + 1.7.18）**
+   1.7.11 加 OpenRouter / OpenAI-compatible（OpenAI SSE delta.content）。1.7.18 加 Gemini direct（streamGenerateContent SSE）。當前 `BATCH_PROVIDERS = {anthropic, openrouter, openai-compatible, gemini}`。Ollama 仍只走單筆。
 
 6. **舊 worker 在 sync block 中對 `SIGTERM` 無回應**
    1.7.0 worker 卡 sweep 時 event loop 鎖死，`kiroku stop` 發 SIGTERM 也不退。要 `kill -KILL <pid>` 才能殺。1.7.2+ 因 sweep 改 async + yield，SIGTERM handler 會在下一輪 yield 觸發、能正常退出。
@@ -496,7 +496,24 @@ kiroku stop && kiroku start
 }
 ```
 
-8. **OpenRouter / OpenAI-compatible: thinking models 會回 `content=null`**
+8. **Gemini direct + batch：必須用 `gemini-3-flash-preview` 或更高、不能用 `gemini-2.0-flash`**
+   實測 2026-05-02：`gemini-2.0-flash` 對 batch prompt 的 `===TURN_N_END===` 協定完全不照、5/5 turn parse 失敗、全部 dead-letter。換 `gemini-3-flash-preview`：
+   ```
+   provider=gemini req=5 done=5 err=0  input=2662 output=1132
+   ```
+   protocol 完全照（`{"turn_index":0,...}` 開頭 + delimiters + 無 markdown fence）。
+   推薦 config：
+   ```json
+   "extraction": {
+     "provider": "gemini",
+     "model": "gemini-3-flash-preview",
+     "apiKeyEnv": "GEMINI_API_KEY",
+     "batch": { "enabled": true, "maxTurnsPerCall": 5 }
+   }
+   ```
+   月費估算（100 turn/day × 30 天，Gemini 3 Flash $0.50 input / $3.00 output per M）：~$2.7/月（比 OpenRouter Qwen Flash $3-5/月還便宜）。
+
+9. **OpenRouter / OpenAI-compatible: reasoning-only models 會回 `content=null`**
    `callOpenAICompatible` 讀 `choices[0].message.content`，但 reasoning-only 模型把答案放 `message.reasoning`，content 留 null。worker 直接 throw `Empty extraction response`、永遠 retry。
    實證（2026-05）：
    - `qwen/qwen3.6-35b-a3b` ❌ reasoning only（content=null）
@@ -505,7 +522,7 @@ kiroku stop && kiroku start
    `mode api` preset 預設 Qwen 3.6 Flash 避開這個雷。要用其他 OpenRouter 模型先 `curl` 測一下 `message.content` 不為 null 才能用。
    要支援 reasoning-only 模型需擴 `callOpenAICompatible` 在 OpenRouter 路徑加 `reasoning: { exclude: true }` 參數（OpenRouter-specific），目前 worker 沒做。
 
-9. **API key 必須放 `ANTHROPIC_API_KEY`，不可放 `ANTHROPIC_AUTH_TOKEN`**
+10. **API key 必須放 `ANTHROPIC_API_KEY`，不可放 `ANTHROPIC_AUTH_TOKEN`**
    `anthropic-auth.js` priority 跟 header 對應：
    ```
    priority 1  CLAUDE_CODE_OAUTH_TOKEN  →  Authorization: Bearer ...        OAuth Max only (sk-ant-oat-...)
@@ -519,14 +536,14 @@ kiroku stop && kiroku start
    ```
    另外，API key 用之前要先在 [console.anthropic.com / Plans & Billing](https://console.anthropic.com/settings/billing) 儲值，否則 server 回 `HTTP 400 credit balance is too low`。
 
-9. **Stuck `processing/` 檔案不會自動回收（已修，commit `f7a88ff`）**
+11. **Stuck `processing/` 檔案不會自動回收（已修，commit `f7a88ff`）**
    worker crash 或被 SIGKILL 後，已 rename 進 `processing/` 的 file 仍留在那、但 `pollQueue` 只掃 `incoming/`，這些孤兒永遠不被處理。緊急救援：
    ```bash
    mv ~/.kiroku/data/queue/processing/*.jsonl ~/.kiroku/data/queue/incoming/
    ```
    1.7.0+ 的正常 stop（SIGTERM）會跑 `rescueBatchBuffer`，把 batch buffer 內未 flush 的 item 搬回 incoming。
 
-10. **Worker 不會主動讓 quota 給 chat（1.7.14 加 adaptive throttle）**
+12. **Worker 不會主動讓 quota 給 chat（1.7.14 加 adaptive throttle）**
     1.7.10 撞 429 後才 ratelimit-aware backoff，但工人會一路 push 到撞牆才減速。期間使用者前景對話可能撞 429。
     1.7.14+ `worker.throttle.adaptive: true`（預設）讀每筆 anthropic response 的 utilization：
     - 任一 window util ≥ 80% → worker rate 降到 50%（20→10/min）
@@ -537,7 +554,7 @@ kiroku stop && kiroku start
     "worker": { "throttle": { "adaptive": false } }
     ```
 
-11. **Dead-letter 累積無上限（1.7.12 加管理命令）**
+13. **Dead-letter 累積無上限（1.7.12 加管理命令）**
     Worker `maxAttempts` 用完會把 file 移到 `queue/dead-letter/`，當前無自動清理。1885+ 個累積很常見（OAuth 撞 429 → 全部 dead-letter）。1.7.12+ 用：
     ```bash
     kiroku dead-letter                        # 看最新 20 筆
@@ -626,4 +643,4 @@ kiroku stop && kiroku start   # 套用
 | `66035cf` | 1.7.15 | Fix — chunked decay sweep (5000-row tx, yield between chunks) |
 | `a1386e4` | 1.7.16 | Refactor — prompt-loader batch slot scaffolding (no behavior change) |
 | `f0a06e6` | 1.7.17 | Feat — server-side `?slot=` route + client multi-slot fetch/cache |
-| `4a58115` | 1.7.18 | Feat — extractBatch supports Gemini direct (streamGenerateContent SSE) |
+| `4a58115` | 1.7.18 | Feat — extractBatch supports Gemini direct (streamGenerateContent SSE) — verified 2026-05-02 with `gemini-3-flash-preview` (5/5 turns processed); `gemini-2.0-flash` does not follow the batch delimiter protocol so its content fails to parse — use `gemini-3-flash-preview` (or fall back to single-turn `extract()` path for 2.0 Flash) |

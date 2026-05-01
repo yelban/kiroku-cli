@@ -285,18 +285,18 @@ API Key 反而便宜是因為 worker extraction 真實用量很少（每天可�
 | episodic | 3 ent / 1 fact | 3 ent / 1 fact | Haiku 用 `kiroku-cli` 為 subject、Sonnet 用 `team` |
 | trivial | 0 / 0 | 0 / 0 | 一致 |
 
-#### 對 mode 選擇的真實影響（2026-05 實證後修訂）
+#### 對 mode 選擇的真實影響（1.7.7 預設 Sonnet 4.6 後修訂）
 
 | 情境 | 推薦 | 為什麼 |
 |---|---|---|
-| 單 session worker（_batchFlushing single-flight） | **`mode subscription` + 手改 model 為 `claude-sonnet-4-6`** | Sonnet cache 命中、~$7.8/月、quality 微優、single-flight 不撞 burst |
-| 多 session 並用（OAuth Max） | **`mode subscription`（default Haiku 4.5）** | Haiku no-cache 但 burst ≥ 5；Sonnet ≤ 2 burst 在多並發場景吃 429 |
-| API Key + 任何 session 數 | **改用 Sonnet 4.6** | Haiku 沒 cache 反而貴；API Key burst 限制比 OAuth 寬，多 session 也安全 |
-| 省錢極致（不在乎 batch+cache） | **`mode api`**（OpenRouter Qwen 3.6） | $1.5/月、Anthropic 之外完全不踩 burst/quota 雷 |
+| 單 session worker（_batchFlushing single-flight） | **`mode subscription`**（1.7.7+ 預設 Sonnet 4.6） | Sonnet cache 命中、~$7.8/月、quality 微優、single-flight 不撞 burst |
+| 多 session 並用 OAuth + 重 batch | **`mode subscription` 後手改 model 為 `claude-haiku-4-5-20251001`** | Haiku no-cache 但 burst ≥ 5；接受月費較高（~$10.8）換 burst 寬鬆 |
+| API Key + 任何 session 數 | **`mode subscription`** | API Key burst 限制比 OAuth 寬、Sonnet 4.6 + cache 永遠最划算 |
+| 省錢極致（不在乎 quality 微差） | **`mode api`**（1.7.9 預設 Qwen 3.6 Flash + 1.7.11 batch on） | ~$3-5/月、Anthropic 之外完全不踩 burst/quota 雷 |
 
 > 測試 Anthropic 帳戶：API key 走獨立 credit pool，跟訂閱的 Extra usage credit 不互通。要 API key 能用須去 [console / Plans & Billing](https://console.anthropic.com/settings/billing) 加 API credits（不是 spending limit）。
 
-> 後續 follow-up：worker 應該偵測 model 是否實際 cache hit，連續幾次 cache_read=0 時自動降 cache_control（避免 cache_creation 浪費）。目前未實作。
+> Cache anomaly 自動降級已實作（1.7.8+ cache-health）：worker 連續觀察某 model 3 次 cache_creation > 0 但 cache_read = 0 → 自動移除 cache_control 24h 重試。Haiku 4.5 在你環境上會自動跳過 cache_control。
 
 ### 一鍵切換 mode（1.7.5+，1.7.7 改 Sonnet default、1.7.9 改 Qwen Flash default）
 
@@ -375,13 +375,14 @@ A. **訂閱 Claude Pro/Max + 多 session 並用** — Haiku 4.5（burst 寬鬆�
 "extraction": {
   "provider": "anthropic",
   "model": "claude-haiku-4-5-20251001",
-  "effort": "medium",
   "batch": { "enabled": true, "maxTurnsPerCall": 5 }
 }
 ```
-- 成本：$0（訂閱已付）
-- 風險：5h / 7d window quota 仍跟對話共用、品質略低於 Sonnet
-- token sync：1.7.4 reconcile 三道防線自動處理
+> 不送 `effort` — Haiku 4.5 backend 拒收 effort 參數（HTTP 400），1.7.6 加了 runtime fallback 自動降級，但 preset 直接不送更乾淨。
+
+- 成本：$0（訂閱已付，5h / 7d 配額計入訂閱）
+- 風險：Haiku cache 平台層級失效（1.7.8 cache-health 偵測後會自動跳過 cache_control）；5h / 7d window quota 仍跟對話共用；品質略低於 Sonnet
+- token sync：1.7.3-1.7.4 OAuth reconcile 三道防線自動處理
 
 B. **省錢極致 / 不在乎 batch** — 任一便宜模型走單筆 path
 

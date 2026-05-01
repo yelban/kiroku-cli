@@ -58,6 +58,7 @@ const ConfigSchema = z.object({
     throttle: z.object({
       enabled: z.boolean().default(true),
       maxCallsPerMinute: z.number().default(20),
+      adaptive: z.boolean().default(true),
     }).default({}),
     extraction: z.object({
       provider: z.string().default('openrouter'),

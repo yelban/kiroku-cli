@@ -8,6 +8,7 @@ import { resolveAnthropicAuth, buildAuthHeaders, reconcileOauthToken } from './a
 import { createBatchStreamParser } from './batch-parser.js';
 import { recordUsage as recordCacheUsage, shouldUseCacheControl, getCacheHealth } from './cache-health.js';
 import { parseRatelimit, deriveRetryAfterMs } from './ratelimit.js';
+import { sharedThrottle } from './throttle.js';
 import EMBEDDED_BATCH_PROMPT from '../../prompts/extraction-batch.md';
 
 const log = createLogger('extractor');
@@ -168,6 +169,7 @@ async function extractBatchAnthropicOnce(turns, config) {
   recordCacheUsage(model, u);
   const health = getCacheHealth(model);
   const ratelimit = parseRatelimit(httpResult?.headers);
+  if (ratelimit) sharedThrottle.noteRatelimit(ratelimit);
   log.info({
     cache_creation: u.cache_creation_input_tokens || 0,
     cache_read: u.cache_read_input_tokens || 0,
@@ -405,6 +407,7 @@ async function callAnthropicOnce(text, config) {
   recordCacheUsage(model, u);
   const health = getCacheHealth(model);
   const ratelimit = parseRatelimit(respHeaders);
+  if (ratelimit) sharedThrottle.noteRatelimit(ratelimit);
   if (useCache || u.cache_creation_input_tokens || u.cache_read_input_tokens || ratelimit) {
     log.info({
       cache_creation: u.cache_creation_input_tokens || 0,

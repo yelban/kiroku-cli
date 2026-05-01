@@ -12,7 +12,7 @@ import { initPromptLoader, getPrompt, stopPromptLoader } from './prompt-loader.j
 import { setDb, storeTurn, storeEntities, storeFacts, storeEmbeddings, createExtractionJob, updateExtractionJob, runDecaySweep, runCompactionSweep } from './store.js';
 import { getLicenseState } from '../license/license-state.js';
 import { shouldSkipTurn } from './filter.js';
-import { createThrottle } from './throttle.js';
+import { sharedThrottle as _throttle } from './throttle.js';
 import { reconcileOauthToken } from './anthropic-auth.js';
 
 const log = createLogger('worker');
@@ -25,7 +25,6 @@ let _licenseState = null;
 let _dailyExtractCount = 0;
 let _dailyExtractDate = '';
 const _retryAttempts = new Map(); // filename -> { count, nextAttemptAfter }
-const _throttle = createThrottle();
 
 // Batch pipeline state (Phase 2)
 const _batchBuffer = []; // [{ filename, event, processingPath, jid, assistantTurnId }]

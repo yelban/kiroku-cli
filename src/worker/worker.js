@@ -6,7 +6,7 @@ import { loadConfig } from '../shared/config.js';
 import { createLogger } from '../shared/logger.js';
 import { initDb, runMigrations, closeDb } from '../shared/db.js';
 import { jobId } from '../shared/ids.js';
-import { extract, extractBatch, setPromptProvider } from './extractor.js';
+import { extract, extractBatch, setPromptProvider, BATCH_PROVIDERS } from './extractor.js';
 import { embedTexts, initEmbedder } from './embedder.js';
 import { initPromptLoader, getPrompt, stopPromptLoader } from './prompt-loader.js';
 import { setDb, storeTurn, storeEntities, storeFacts, storeEmbeddings, createExtractionJob, updateExtractionJob, runDecaySweep, runCompactionSweep } from './store.js';
@@ -229,9 +229,10 @@ async function processFile(filename, config) {
       return;
     }
 
-    // 4. If batch mode is enabled (anthropic provider only), hand off to batch pipeline.
+    // 4. If batch mode is enabled and the provider supports streaming batches
+    // (anthropic, openrouter, openai-compatible), hand off to batch pipeline.
     const batchCfg = config.worker.extraction.batch;
-    if (batchCfg?.enabled && config.worker.extraction.provider === 'anthropic') {
+    if (batchCfg?.enabled && BATCH_PROVIDERS.has(config.worker.extraction.provider)) {
       bufferEvent({
         filename,
         event,

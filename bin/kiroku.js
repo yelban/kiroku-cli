@@ -1040,7 +1040,8 @@ function detectMode(ext) {
     return `subscription (Anthropic / ${ext.model} + batch)`;
   }
   if (ext.provider !== 'anthropic') {
-    return `api (${ext.provider}${ext.model ? ' / ' + ext.model : ''}, batch off)`;
+    const batch = ext.batch?.enabled ? `batch on` : `batch off`;
+    return `api (${ext.provider}${ext.model ? ' / ' + ext.model : ''}, ${batch})`;
   }
   return 'custom';
 }
@@ -1114,8 +1115,17 @@ async function cmdMode() {
       model: 'qwen/qwen3.6-flash',
       apiKeyEnv: 'OPENROUTER_API_KEY',
       temperature: 0,
-      maxOutputTokens: 2048,
-      batch: { enabled: false },
+      maxOutputTokens: 8000,
+      // 1.7.11+ extractBatch supports openrouter/openai-compatible via
+      // OpenAI-style SSE (delta.content -> BatchStreamParser.feedRaw).
+      // Batch keeps the system prompt charged once per call instead of N.
+      batch: {
+        enabled: true,
+        maxTurnsPerCall: 5,
+        minTurnsPerCall: 3,
+        flushTimeoutMs: 15000,
+        outputTokenBudget: 6000,
+      },
     };
     delete cfg.worker.extraction.effort;
     delete cfg.worker.extraction.baseUrl;

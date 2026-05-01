@@ -66,12 +66,25 @@ function getBatchSystemPrompt() {
   return _batchSystemPrompt;
 }
 
+// Providers supported by the batch streaming pipeline. Caller (worker.js)
+// uses the same set to decide whether processFile routes through bufferEvent.
+export const BATCH_PROVIDERS = new Set(['anthropic', 'openrouter', 'openai-compatible']);
+
 export async function extractBatch(turns, extractionConfig) {
   const provider = extractionConfig.provider;
-  if (provider !== 'anthropic') {
-    throw new Error(`extractBatch only supports anthropic provider (got: ${provider})`);
+  if (provider === 'anthropic') {
+    return await extractBatchAnthropic(turns, extractionConfig);
   }
-  return await extractBatchAnthropic(turns, extractionConfig);
+  if (provider === 'openrouter' || provider === 'openai-compatible') {
+    const apiKey = process.env[extractionConfig.apiKeyEnv || 'OPENROUTER_API_KEY']
+      || process.env.OPENROUTER_API_KEY;
+    if (!apiKey) throw new Error(`extractBatch ${provider}: missing API key in env`);
+    const baseUrl = provider === 'openrouter'
+      ? 'https://openrouter.ai/api/v1'
+      : (extractionConfig.baseUrl || 'https://api.openai.com/v1');
+    return await extractBatchOpenAICompatible(turns, extractionConfig, apiKey, baseUrl);
+  }
+  throw new Error(`extractBatch does not support provider: ${provider}`);
 }
 
 async function extractBatchAnthropic(turns, config) {
@@ -171,6 +184,89 @@ async function extractBatchAnthropicOnce(turns, config) {
   if (health?.status === 'broken' && useCache) {
     log.warn({ model, creations: health.creations, reads: health.reads }, 'prompt cache appears broken on this model — disabling cache_control for subsequent calls (24h cooldown)');
   }
+  return result;
+}
+
+// OpenAI-compatible (incl. OpenRouter) batch streaming. SSE shape:
+//   data: {"choices":[{"delta":{"content":"..."}}]}
+//   data: [DONE]
+// We accumulate every delta.content into the BatchStreamParser via feedRaw,
+// which then handles ===TURN_N_END=== detection just like the Anthropic path.
+//
+// Reasoning-only models (e.g. qwen3.6-35b-a3b) keep emitting empty content
+// and stash text under delta.reasoning — those will produce 0 completed
+// turns. mode api preset already steers users away from those.
+async function extractBatchOpenAICompatible(turns, config, apiKey, baseUrl) {
+  const userMessage = turns.map((t, idx) =>
+    `===TURN_${idx}===\n${t.text}\n===TURN_${idx}_END_INPUT===`
+  ).join('\n\n');
+
+  const requestBody = {
+    model: config.model,
+    temperature: config.temperature ?? 0,
+    max_tokens: config.maxOutputTokens || 8000,
+    stream: true,
+    messages: [
+      { role: 'system', content: getBatchSystemPrompt() },
+      { role: 'user', content: userMessage },
+    ],
+  };
+  const body = JSON.stringify(requestBody);
+
+  const url = new URL(baseUrl);
+  const path = url.pathname.replace(/\/$/, '') + '/chat/completions';
+
+  const parser = createBatchStreamParser();
+  const decoder = new TextDecoder();
+  let sseBuffer = '';
+  let usage = null;
+
+  const httpResult = await httpRequestStreaming({
+    hostname: url.hostname,
+    port: parseInt(url.port) || (url.protocol === 'https:' ? 443 : 80),
+    path,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      Accept: 'text/event-stream',
+      'Content-Length': Buffer.byteLength(body),
+    },
+    protocol: url.protocol.replace(':', ''),
+    onData: chunk => {
+      sseBuffer += decoder.decode(chunk, { stream: true });
+      const lines = sseBuffer.split('\n');
+      sseBuffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) parser.feedRaw(delta);
+          if (parsed.usage) usage = parsed.usage;
+        } catch { /* skip malformed */ }
+      }
+    },
+  }, body);
+
+  // OpenAI-compatible shape: {prompt_tokens, completion_tokens, total_tokens}
+  const result = parser.finalize();
+  log.info({
+    input: usage?.prompt_tokens || 0,
+    output: usage?.completion_tokens || 0,
+    requested: turns.length,
+    completed: result.completedTurns.length,
+    errors: result.errors.length,
+    stop: result.stopReason,
+    provider: baseUrl.includes('openrouter') ? 'openrouter' : 'openai-compatible',
+  }, 'batch extraction usage');
+
+  // OpenAI-compatible providers report rate limits in HTTP headers
+  // (x-ratelimit-* on OpenAI, openrouter-specific headers on OR), but
+  // the format isn't unified, so we skip the parseRatelimit step.
+  void httpResult;
   return result;
 }
 

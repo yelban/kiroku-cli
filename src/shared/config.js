@@ -47,6 +47,18 @@ const ConfigSchema = z.object({
       baseDelayMs: z.number().default(2000),
       maxDelayMs: z.number().default(60000),
     }).default({}),
+    filter: z.object({
+      enabled: z.boolean().default(true),
+      minTextLength: z.number().default(50),
+      skipPureToolTurns: z.boolean().default(true),
+      trivialAssistantPhrases: z.array(z.string()).default([
+        'OK', '好的', '了解', '收到', '已完成', 'Done', '完成', '可以',
+      ]),
+    }).default({}),
+    throttle: z.object({
+      enabled: z.boolean().default(true),
+      maxCallsPerMinute: z.number().default(20),
+    }).default({}),
     extraction: z.object({
       provider: z.string().default('openrouter'),
       model: z.string().default('google/gemini-2.0-flash-001'),
@@ -54,6 +66,7 @@ const ConfigSchema = z.object({
       apiKeyEnv: z.string().default('OPENROUTER_API_KEY'),
       temperature: z.number().default(0),
       maxOutputTokens: z.number().default(1200),
+      effort: z.enum(['low', 'medium', 'high', 'max']).default('medium'),
       fallback: z.object({
         provider: z.string().default('ollama'),
         model: z.string().default('qwen2.5:14b-instruct-q4_K_M'),

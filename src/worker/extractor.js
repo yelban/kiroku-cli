@@ -129,7 +129,7 @@ async function callGemini(text, config, apiKey) {
 
 async function callAnthropic(text, config) {
   const auth = await resolveAnthropicAuth(config);
-  const body = JSON.stringify({
+  const requestBody = {
     model: config.model || 'claude-haiku-4-5-20251001',
     max_tokens: config.maxOutputTokens || 1200,
     system: [
@@ -142,7 +142,11 @@ async function callAnthropic(text, config) {
     messages: [
       { role: 'user', content: `Extract knowledge from the following conversation turn:\n\n${text}` },
     ],
-  });
+  };
+  if (config.effort) {
+    requestBody.output_config = { effort: config.effort };
+  }
+  const body = JSON.stringify(requestBody);
 
   const url = new URL(auth.baseUrl);
   const authHeaders = buildAuthHeaders(auth);

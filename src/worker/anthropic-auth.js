@@ -13,7 +13,9 @@ const REFRESH_ENDPOINTS = [
   'https://platform.claude.com/v1/oauth/token',
   'https://console.anthropic.com/v1/oauth/token',
 ];
-const OAUTH_BETAS = 'claude-code-20250219,oauth-2025-04-20';
+const COMMON_BETAS = ['effort-2025-11-24'];
+const OAUTH_BETAS = ['claude-code-20250219', 'oauth-2025-04-20', ...COMMON_BETAS].join(',');
+const APIKEY_BETAS = COMMON_BETAS.join(',');
 
 let _cached = null;
 let _claudeCodeVersion = null;
@@ -224,6 +226,8 @@ export function buildAuthHeaders(auth) {
     headers['anthropic-beta'] = OAUTH_BETAS;
     headers['user-agent'] = `claude-cli/${getClaudeCodeVersion()} (external, cli)`;
     headers['x-app'] = 'cli';
+  } else {
+    headers['anthropic-beta'] = APIKEY_BETAS;
   }
   return headers;
 }

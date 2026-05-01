@@ -11,6 +11,8 @@ import { embedTexts, initEmbedder } from './embedder.js';
 import { initPromptLoader, getPrompt, stopPromptLoader } from './prompt-loader.js';
 import { setDb, storeTurn, storeEntities, storeFacts, storeEmbeddings, createExtractionJob, updateExtractionJob, runDecaySweep, runCompactionSweep } from './store.js';
 import { getLicenseState } from '../license/license-state.js';
+import { shouldSkipTurn } from './filter.js';
+import { createThrottle } from './throttle.js';
 
 const log = createLogger('worker');
 
@@ -21,6 +23,7 @@ let _licenseState = null;
 let _dailyExtractCount = 0;
 let _dailyExtractDate = '';
 const _retryAttempts = new Map(); // filename -> { count, nextAttemptAfter }
+const _throttle = createThrottle();
 
 export async function startWorker() {
   const config = loadConfig();
@@ -110,6 +113,11 @@ async function pollQueue(config) {
       // Skip files still in backoff window
       const retry = _retryAttempts.get(file);
       if (retry && now < retry.nextAttemptAfter) continue;
+      // Throttle by per-minute call budget
+      if (!_throttle.check(config.worker.throttle)) {
+        log.debug({ window: _throttle.size() }, 'throttled, will retry next poll');
+        break;
+      }
       await processFile(file, config);
       _dailyExtractCount++;
     }
@@ -151,7 +159,16 @@ async function processFile(filename, config) {
     // 1. Store the turn
     const turnData = storeTurn(event);
 
-    // 2. Extract entities and facts via LLM
+    // 2. Filter trivial turns (skip LLM call but keep turn history)
+    const skipReason = shouldSkipTurn(event, config.worker.filter);
+    if (skipReason) {
+      updateExtractionJob(jid, { status: 'done', finishedAt: new Date().toISOString() });
+      renameSync(processingPath, donePath);
+      log.info({ jid, eventId: event.event_id, skipReason }, 'turn skipped by filter');
+      return;
+    }
+
+    // 3. Extract entities and facts via LLM
     const combinedText = [event.request?.user_text, event.response?.assistant_text]
       .filter(Boolean).join('\n\n---\n\n');
 

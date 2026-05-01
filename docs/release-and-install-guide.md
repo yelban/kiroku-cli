@@ -623,3 +623,4 @@ kiroku stop && kiroku start   # 套用
 | `5c614cc` | 1.7.13 | Feat — `kiroku status` shows mode + cache + ratelimit utilization |
 | `eea1fc3` | 1.7.14 | Feat — adaptive throttle (auto-throttle when ratelimit utilization > 80% / > 95%) |
 | `66035cf` | 1.7.15 | Fix — chunked decay sweep (5000-row tx, yield between chunks) |
+| `a1386e4` | 1.7.16 | Refactor — prompt-loader batch slot scaffolding (no behavior change) |

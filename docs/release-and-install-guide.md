@@ -154,14 +154,17 @@ tail -f ~/.kiroku/logs/worker.log    | grep -E 'turn skipped by filter|throttled
 2. **OAuth Max token 必須宣告 Claude Code 身分**
    `system` 第一塊必須是字串 `"You are Claude Code, Anthropic's official CLI for Claude."`，否則 server 回 HTTP 429 偽裝成 `rate_limit_error`。`buildAnthropicSystem()`（commit `ce993c2`）已在 `auth.isOAuth=true` 時自動前置這個 block，extraction prompt 仍保留 ephemeral cache_control。
 
-3. **`~/.kiroku/.env` 的 token 跟 Keychain 不一致（已自動修復，1.7.3+）**
-   `resolveAnthropicAuth` 優先序：env > Keychain。Claude Code session 重啟會 rotate OAuth access token，`.env` 不會自動跟 Keychain 同步——舊版會持續用舊 token 撞 HTTP 401。
-   `reconcileOauthToken()`（commit `ccf3f04`）在 `startWorker()` 開頭跑：偵測 macOS Keychain 的 `Claude Code-credentials` 跟 `process.env.CLAUDE_CODE_OAUTH_TOKEN` 不一致時，自動把 Keychain token promote 進 process.env（`.env` 檔案不動）。warning 寫到 `~/.kiroku/logs/anthropic-auth.log`：
+3. **`~/.kiroku/.env` 的 token 跟 Keychain 不一致（已三道防線覆蓋，1.7.3 + 1.7.4）**
+   `resolveAnthropicAuth` 優先序：env > Keychain。Claude Code session 重啟 / OAuth token 1h 自動 refresh / `claude logout && claude login` 都會 rotate Keychain token，`.env` 不會跟著動。三道防線：
+   - **Startup reconcile**（`ccf3f04`）：`startWorker()` 開頭比對，不一致就 promote Keychain → `process.env`
+   - **401 retry**（`5b74166`）：`withOauth401Retry()` 包 `callAnthropic` + `extractBatchAnthropic`，HTTP 401 → reconcile → retry 一次
+   - **Periodic reconcile**（`5b74166`）：每 5 分鐘 background timer 主動同步，避免 worker 跑數小時後撞 401
+   `.env` 檔案不動，只更新 `process.env`。warning 寫到 `~/.kiroku/logs/anthropic-auth.log`：
    ```
    env OAuth token differs from Keychain — promoting Keychain
    envTail=...XXXXXXXX  keychainTail=...YYYYYYYY
    ```
-   非 macOS 機器或 Keychain 也過期 → 仍維持 env 值，需手動同步。
+   非 macOS 或 Keychain 也過期 → 維持 env 值，需手動同步（macOS Keychain 一般跟著 Claude Code 自動 refresh，幾乎不會兩邊都過期）。
 
 4. **Initial decay + compaction sweep 阻塞 pollQueue（已修復，1.7.1 + 1.7.2）**
    早期版本同步跑 sweep，47k facts × O(N²) cosine compare + per-fact embedding SELECT 會吃 8-15 分鐘，期間 incoming 不會被處理、`SIGUSR1` 也不被回應。
@@ -174,7 +177,21 @@ tail -f ~/.kiroku/logs/worker.log    | grep -E 'turn skipped by filter|throttled
 6. **舊 worker 在 sync block 中對 `SIGTERM` 無回應**
    1.7.0 worker 卡 sweep 時 event loop 鎖死，`kiroku stop` 發 SIGTERM 也不退。要 `kill -KILL <pid>` 才能殺。1.7.2+ 因 sweep 改 async + yield，SIGTERM handler 會在下一輪 yield 觸發、能正常退出。
 
-7. **Stuck `processing/` 檔案不會自動回收**
+7. **多 Claude Code session 共用 OAuth Max quota**
+   OAuth Max quota 是**帳號級**（5 小時 rolling window）。多個並行 session + kiroku worker batch extraction 全部一起算。重 batch 流量場景容易撞「rate_limit_error」（即使 token 有效）。
+   緩解選項：
+   - 開保守 batch：`maxTurnsPerCall=3` 而非 5、`flushTimeoutMs=30000`
+   - 開 throttle 嚴一點：`worker.throttle.maxCallsPerMinute=10`
+   - **徹底分離（推薦）**：worker 改走 API Key，跟 Claude Code session 完全獨立 quota：
+     ```bash
+     # 從 https://console.anthropic.com 拿 sk-ant-api03-... key
+     echo "ANTHROPIC_API_KEY=sk-ant-api03-..." >> ~/.kiroku/.env
+     # 移掉 CLAUDE_CODE_OAUTH_TOKEN 那行（讓 priority 走到 #3 API key）
+     kiroku stop && kiroku start
+     ```
+     extraction 用量低（~330 tokens/turn 加 cache 命中）、Sonnet 4.6 input $3/M output $15/M、每天 100 turn 估 ~$0.05/day。
+
+8. **Stuck `processing/` 檔案不會自動回收**
    worker crash 或被 SIGKILL 後，已 rename 進 `processing/` 的 file 仍留在那、但 `pollQueue` 只掃 `incoming/`，這些孤兒永遠不被處理。緊急救援：
    ```bash
    mv ~/.kiroku/data/queue/processing/*.jsonl ~/.kiroku/data/queue/incoming/
@@ -194,4 +211,5 @@ tail -f ~/.kiroku/logs/worker.log    | grep -E 'turn skipped by filter|throttled
 | `63c160c` | 1.7.0 | Fix — embed batch prompt into bundle (npm tarball 不含 prompts/) |
 | `b2c3628` | 1.7.1 | Fix — defer initial sweep + yield event loop |
 | `9c3f041` | 1.7.2 | Fix — finer-grained yields in compaction sweep |
-| `ccf3f04` | 1.7.3 | Feat — auto-reconcile env OAuth token vs Keychain |
+| `ccf3f04` | 1.7.3 | Feat — auto-reconcile env OAuth token vs Keychain (startup) |
+| `5b74166` | 1.7.4 | Feat — 401 retry + periodic 5min reconcile |

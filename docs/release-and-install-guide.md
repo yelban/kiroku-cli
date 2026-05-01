@@ -134,6 +134,18 @@ tail -f ~/.kiroku/logs/worker.log    | grep -E 'turn skipped by filter|throttled
 
 看到 `batch extraction usage requested=N completed=N errors=0` 表示 batch 端到端正常。
 
+1.7.10+ 每筆 anthropic 回應都附 `ratelimit` 欄位（utilization + reset epoch + 主要受限 window）：
+```json
+"ratelimit": {
+  "fivehUtil": 0.13,        // 5h window utilization
+  "sevenDUtil": 0.65,       // 7d window utilization
+  "sevenDSonnetUtil": 0.01, // Sonnet 個別 7d 配額
+  "fivehReset": 1777661400, // 5h reset epoch (秒)
+  "claim": "five_hour"      // 當前主要受限 window
+}
+```
+撞 429 時 worker 改用 `retry-after` 或 closest reset epoch 做 sleep（cap 60s），log 會出現 `ratelimitDriven=true`。
+
 ---
 
 ## 檢核：什麼時候要做哪一個
@@ -583,3 +595,4 @@ kiroku stop && kiroku start   # 套用
 | `3505aca` | 1.7.7 | Feat — mode subscription default Sonnet 4.6 (drop Haiku) |
 | `6d98bb9` | 1.7.8 | Feat — cache-health auto-disable for broken-cache models |
 | `c9739c8` | 1.7.9 | Fix — mode api default Qwen 3.6 Flash (avoid 35B A3B reasoning-only) |
+| `8302aed` | 1.7.10 | Feat — ratelimit-aware retry + utilization logging (anthropic-ratelimit-unified-* headers) |

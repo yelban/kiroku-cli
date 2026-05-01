@@ -361,7 +361,7 @@ total cache_read = 17,654 tokens（攤銷後 ~10% 原成本）
 
 | 限制 | 說明 |
 |---|---|
-| 只 anthropic provider 支援 | 其他 provider 走單筆 `extract()`（filter / throttle 仍生效，但無 batch + cache） |
+| ~~只 anthropic provider 支援~~（1.7.11 解除）| 1.7.11 起 OpenRouter / OpenAI-compatible 也支援 batch streaming（用 OpenAI SSE delta.content）。Cache 仍只 Anthropic 真實顯示 cache_read tokens（OpenAI 自動 prefix cache，但 user 不可見）|
 | **Haiku 4.5 cache 失效** | platform-wide：OAuth + API key 都不 cache。**不要用 Haiku + cache_control**，反而花 cache_creation 開銷沒攤銷。1.7.8+ 自動偵測降級（連續 3 次 creation 沒 read → 拿掉 cache_control 24h）|
 | Cache TTL 5 分鐘 | worker idle 5+ 分鐘後 cache 過期、下次 batch 重新 cache_creation。對中重度對話頻率不影響 |
 | OAuth Sonnet 並發 ≤ 2 | single worker（_batchFlushing=1）OK；user 對話 + worker batch 同送可能瞬間 ≥ 2 撞 burst |
@@ -596,3 +596,4 @@ kiroku stop && kiroku start   # 套用
 | `6d98bb9` | 1.7.8 | Feat — cache-health auto-disable for broken-cache models |
 | `c9739c8` | 1.7.9 | Fix — mode api default Qwen 3.6 Flash (avoid 35B A3B reasoning-only) |
 | `8302aed` | 1.7.10 | Feat — ratelimit-aware retry + utilization logging (anthropic-ratelimit-unified-* headers) |
+| `e2f656f` | 1.7.11 | Feat — extractBatch supports OpenRouter + OpenAI-compatible (mode api batch on default) |

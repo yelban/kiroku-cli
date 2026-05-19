@@ -144,6 +144,11 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
 
       if (existing) {
         d.prepare(`UPDATE facts SET status = 'superseded', updated_at = ? WHERE id = ?`).run(now, existing.id);
+        if (isVecEnabled()) {
+          try {
+            d.prepare(`UPDATE fact_embeddings SET status = 'superseded' WHERE fact_id = ?`).run(existing.id);
+          } catch { /* embedding may not exist yet */ }
+        }
       }
     }
 
@@ -267,6 +272,11 @@ export function saveFactManually({ subject, predicate, object, detail, factType,
   ).get(projectId, subjectEntityId, predicate, resolvedScope);
   if (existingFact) {
     d.prepare(`UPDATE facts SET status = 'superseded', updated_at = ? WHERE id = ?`).run(now, existingFact.id);
+    if (isVecEnabled()) {
+      try {
+        d.prepare(`UPDATE fact_embeddings SET status = 'superseded' WHERE fact_id = ?`).run(existingFact.id);
+      } catch { /* embedding may not exist yet */ }
+    }
   }
 
   // Insert new fact

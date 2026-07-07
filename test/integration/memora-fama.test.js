@@ -85,8 +85,9 @@ const scoreState = {
 // Measured M1-3 mixed-ranking baseline: 0.673797 -> 0.764706.
 // M2-2 semantic supersede baseline: 0.764706 -> 0.882353.
 // M3-1 update/delete operation baseline: 0.882353 -> 0.941176.
+// M3-2 move operation baseline: 0.941176 -> 1.0.
 // Update only when a memory-behavior change intentionally changes the mini-FAMA score and the new baseline is reviewed.
-const BASELINE_FAMA_FLOOR = 0.941176;
+const BASELINE_FAMA_FLOOR = 1.0;
 
 function createMemoraDb() {
   const db = new Database(':memory:');
@@ -168,6 +169,8 @@ function addFact({
   factType = 'semantic',
   confidence = 1,
   operation,
+  from,
+  to,
   scope,
   projectId = PROJECT_ID,
   embedding,
@@ -178,7 +181,11 @@ function addFact({
   accessCount = 0,
 }) {
   ensureProject(projectId);
-  const entityMap = storeEntities([{ canonical_name: subject, entity_type: 'concept' }], projectId);
+  const entityNames = [...new Set([subject, endpointName(from), endpointName(to)].filter(Boolean))];
+  const entityMap = storeEntities(entityNames.map(name => ({
+    canonical_name: name,
+    entity_type: name.includes('/') ? 'file' : 'concept',
+  })), projectId);
   const fact = {
     subject,
     predicate,
@@ -187,6 +194,8 @@ function addFact({
     fact_type: factType,
     confidence,
     operation,
+    from,
+    to,
     scope,
   };
   const [factId] = storeFacts([fact], entityMap, projectId, null, null);
@@ -200,15 +209,16 @@ function addFact({
   `).run(createdAt, createdAt, lastAccessedAt, heat, baseHeat, accessCount, factId);
 
   if (embedding) {
-    storeEmbeddings([factId], [embedding], projectId, [{
-      fact_type: factType,
-      operation,
-      confidence,
-      scope,
-    }]);
+    storeEmbeddings([factId], [embedding], projectId, [fact]);
   }
 
   return factId;
+}
+
+function endpointName(endpoint) {
+  if (!endpoint) return null;
+  if (typeof endpoint === 'string') return endpoint;
+  return endpoint.canonical_name || endpoint.name || null;
 }
 
 async function searchRows(query, topK = 10) {
@@ -470,11 +480,11 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     });
   });
 
-  test.fails('05 moved file excludes the old path fact', async () => {
+  test('05 moved file excludes the old path fact', async () => {
     await evaluateQuestion({
       id: '05',
       title: 'moved file',
-      expected: 'test.fails',
+      expected: 'pass',
     }, async ({ criterion }) => {
       const query = 'cache adapter file path';
       const queryVector = basis(5);
@@ -492,6 +502,10 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
         subject: 'src/cache/adapter.js',
         predicate: 'now contains',
         object: 'cache adapter',
+        operation: 'move',
+        from: 'src/legacy/cache.js',
+        to: 'src/cache/adapter.js',
+        confidence: 0.9,
         embedding: newPathVector,
         createdAt: '2026-03-06T10:00:00.000Z',
       });

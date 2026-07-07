@@ -5,12 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+#### Memory Operation Semantics (M3)
+- Extraction prompts now use a four-operation vocabulary: `add` (default new/complementary fact), `update` (new fact supersedes an older version), `delete` (target fact is archived), and `move` (same entity moved/renamed, carrying `{from,to}` identity).
+- `update` and `delete` reuse the semantic supersede resolver with relaxed operation gates; `delete` archives instead of superseding. Without embeddings, operation disposal falls back to exact same-subject matching.
+- `move` is handled by a dedicated pure planner: from-entity active path facts are marked `superseded`, and the from entity canonical name/aliases are merged into the to entity via existing `entities.aliases_json` storage. No schema migration is required.
+- Operation side effects use an inclusive confidence gate at `worker.supersede.operationConfidenceThreshold` (default `0.8`). Below the gate, the extracted fact is still stored and a `memory_operation` audit row records `result: "skipped"`.
+- All operation side effects write `memory_operation` audit rows with operation, confidence, result, action/reason, source fact id, and target fact/entity ids.
+- mini-FAMA question 05 is now a normal passing test with a move fixture. The measured score is `MPA=1`, `FAA=1`, `FAMA=1`, and `BASELINE_FAMA_FLOOR=1.0`.
+- Saturation warning: the nine-question mini-FAMA exam is now fully green. M4's first task should be expanding the exam; `FAMA=1.0` must not be read as memory quality being complete.
+
 ### Changed
 
 #### Semantic Supersede
 - New extracted fact embeddings now run a post-store semantic supersede pass against active facts with the same subject and scope. Matching semantic/decision/episodic facts are marked `superseded`; matching `state`/`task` facts are marked `archived`, with `fact_embeddings.status` kept in sync and a `semantic_supersede` audit row written for each action.
-- Added `worker.supersede.{enabled, semanticThreshold, stateTaskThreshold}`. Defaults are calibrated from the mini-FAMA bge-m3 fixtures at `enabled=true`, `semanticThreshold=0.58`, and `stateTaskThreshold=0.8`.
-- To restore exact-match-only supersede behavior, set `worker.supersede.enabled` to `false`.
+- Added `worker.supersede.{enabled, semanticThreshold, stateTaskThreshold, operationConfidenceThreshold}`. Defaults are calibrated from the mini-FAMA bge-m3 fixtures at `enabled=true`, `semanticThreshold=0.58`, `stateTaskThreshold=0.8`, and `operationConfidenceThreshold=0.8`.
+- To restore exact-match-only supersede behavior and disable operation side effects, set `worker.supersede.enabled` to `false`.
+
+#### Prompt Slot Activation
+- The local prompts are schema-compatible additions. Release order: ship CLI/local prompts first, then manually update the remote `default` and `batch` prompt slots after validation. `prompts/extraction-basic.md` ships through npm/local files and has no remote slot today.
+- Remote slot update commands are documented in `docs/release-and-install-guide.md`; this release does not auto-deploy or auto-activate prompt slots.
 
 #### Compaction
 - Compaction conflict detection now demotes both active facts in a same-subject, same-predicate, different-object conflict by halving `heat` and `base_heat` down to the configured decay floor, and writes `conflict_demote` audit rows for the affected facts.

@@ -56,7 +56,9 @@ Each turn's JSON shape:
       "object": "concise value or description",
       "detail": "optional elaboration (1-2 sentences)",
       "fact_type": "semantic|episodic|preference|task|state",
-      "operation": "add|update|delete",
+      "operation": "add|update|delete|move",
+      "from": "required only for move: previous entity canonical_name",
+      "to": "required only for move: new entity canonical_name",
       "confidence": 0.0-1.0,
       "scope": "project|global"
     }
@@ -108,8 +110,9 @@ Set `operation` on each fact to express how it changes existing memory:
 - **add**: Default. New or complementary knowledge.
 - **update**: A correction or revision that should replace an older fact. Triggers include "改用", "換成", "now uses", "instead uses", "修正為".
 - **delete**: A fact is declared invalid, removed, fixed, resolved, or no longer true. Triggers include "移除", "刪除", "removed", "dropped", "修好", "修復", "fixed", "resolved", "不再", "no longer".
+- **move**: The same entity moved or was renamed, especially file moves/renames and refactors. This preserves identity that delete+add cannot express. A move fact MUST include `"from"` and `"to"` canonical names, and both names MUST appear in the same turn's `entities`. Use `subject` as the new/to entity.
 
-Default to `add` when uncertain. Do NOT mark hypotheticals, questions, proposals, or conditional removals/fixes as `delete`; "if we remove Redis" and "maybe the bug is fixed" are not delete operations. `move` is intentionally out of scope here; emit only add/update/delete.
+Default to `add` when uncertain. Do NOT mark hypotheticals, questions, proposals, or conditional removals/fixes as `delete` or `move`; "if we remove Redis", "maybe the bug is fixed", and "we might move auth.js" are not operations.
 
 ## Scope
 
@@ -154,7 +157,8 @@ Most facts do NOT need detail. Skip it unless it adds genuine future value.
 10. The canonical_name `user` is special — it represents the human speaking. Always include it as a `person` entity when a personal fact is emitted.
 11. `fact.subject` MUST exactly match an entity's `canonical_name` in the SAME turn's response. If the subject is new, create the entity first.
 12. Tools, frameworks, languages, databases, services -> `topic`, NEVER `project`. `project` is only for named software products.
-13. Set `operation` to `add`, `update`, or `delete`; omit it only when it is clearly the default `add`.
+13. Set `operation` to `add`, `update`, `delete`, or `move`; omit it only when it is clearly the default `add`.
+14. For `operation: "move"`, include `from` and `to` as entity canonical names. Do not represent a move as separate delete+add facts.
 
 ## Streaming Discipline
 
@@ -181,6 +185,11 @@ Assistant: 收到。
 User: package.json 已移除 left-pad，不再需要它。
 Assistant: 收到。
 ===TURN_2_END_INPUT===
+
+===TURN_3===
+User: src/legacy/cache.js 搬到 src/cache/adapter.js，cache adapter 還是同一個實作。
+Assistant: 收到。
+===TURN_3_END_INPUT===
 ```
 
 OUTPUT:
@@ -192,6 +201,8 @@ OUTPUT:
 ===TURN_1_END===
 {"turn_index":2,"entities":[{"canonical_name":"package.json","entity_type":"file","aliases":[]}],"facts":[{"subject":"package.json","predicate":"removed dependency","object":"left-pad","fact_type":"semantic","operation":"delete","confidence":1.0,"scope":"project"}]}
 ===TURN_2_END===
+{"turn_index":3,"entities":[{"canonical_name":"src/legacy/cache.js","entity_type":"file","aliases":[]},{"canonical_name":"src/cache/adapter.js","entity_type":"file","aliases":[]}],"facts":[{"subject":"src/cache/adapter.js","predicate":"now contains","object":"cache adapter","fact_type":"semantic","operation":"move","from":"src/legacy/cache.js","to":"src/cache/adapter.js","confidence":1.0,"scope":"project"}]}
+===TURN_3_END===
 ===BATCH_END===
 ```
 
@@ -205,3 +216,4 @@ OUTPUT:
 - Marking React / Vue / PostgreSQL / Tailwind as `entity_type: project`. These are `topic`.
 - Creating a fact whose `subject` is not in the same turn's `entities` array.
 - Marking hypothetical removals, possible fixes, or questions as `operation: "delete"`.
+- Representing a real move as delete+add instead of one `operation: "move"` fact with `from` and `to`.

@@ -104,14 +104,26 @@ function addFact({
   factType = 'semantic',
   confidence = 1,
   operation,
+  from,
+  to,
   embedding,
 }) {
-  const entityMap = storeEntities([{ canonical_name: subject, entity_type: 'concept' }], PROJECT_ID);
-  const fact = { subject, predicate, object, fact_type: factType, confidence, operation };
+  const entityNames = [...new Set([subject, endpointName(from), endpointName(to)].filter(Boolean))];
+  const entityMap = storeEntities(entityNames.map(name => ({
+    canonical_name: name,
+    entity_type: name.includes('/') ? 'file' : 'concept',
+  })), PROJECT_ID);
+  const fact = { subject, predicate, object, fact_type: factType, confidence, operation, from, to };
   const [factId] = storeFacts([fact], entityMap, PROJECT_ID, null, { licensed: true });
   expect(factId).toBeTruthy();
   if (embedding) storeEmbeddings([factId], [embedding], PROJECT_ID, [fact]);
   return factId;
+}
+
+function endpointName(endpoint) {
+  if (!endpoint) return null;
+  if (typeof endpoint === 'string') return endpoint;
+  return endpoint.canonical_name || endpoint.name || null;
 }
 
 function basis(index) {
@@ -269,6 +281,102 @@ describe.skipIf(!sqliteVecProbe.loaded)('semantic supersede store pass', () => {
     expect(detail.cosine).toBeCloseTo(0.84);
   });
 
+  it('move operation supersedes from-entity facts, syncs embeddings, merges aliases, and audits', () => {
+    const oldId = addFact({
+      subject: 'src/legacy/cache.js',
+      predicate: 'contains',
+      object: 'cache adapter',
+      embedding: basis(0),
+    });
+    const moveId = addFact({
+      subject: 'src/cache/adapter.js',
+      predicate: 'now contains',
+      object: 'cache adapter',
+      operation: 'move',
+      from: 'src/legacy/cache.js',
+      to: 'src/cache/adapter.js',
+      confidence: 0.8,
+      embedding: vectorWithCosine(0.87),
+    });
+
+    expect(dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(oldId).status).toBe('superseded');
+    expect(dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(moveId).status).toBe('active');
+    expect(dbState.db.prepare('SELECT status FROM fact_embeddings WHERE fact_id = ?').get(oldId).status).toBe('superseded');
+
+    const targetEntity = dbState.db.prepare('SELECT id, aliases_json FROM entities WHERE canonical_name = ?')
+      .get('src/cache/adapter.js');
+    expect(JSON.parse(targetEntity.aliases_json)).toContain('src/legacy/cache.js');
+
+    const audit = dbState.db.prepare(`
+      SELECT action, target_type, target_id, detail_json
+      FROM audit_logs
+      WHERE action = 'memory_operation'
+    `).get();
+    expect(audit).toMatchObject({
+      action: 'memory_operation',
+      target_type: 'entity',
+      target_id: targetEntity.id,
+    });
+    expect(JSON.parse(audit.detail_json)).toMatchObject({
+      operation: 'move',
+      result: 'applied',
+      action: 'move',
+      confidence: 0.8,
+      sourceFactId: moveId,
+      targetFactIds: [oldId],
+      fromEntityId: expect.any(String),
+      toEntityId: targetEntity.id,
+      addedAliases: ['src/legacy/cache.js'],
+    });
+  });
+
+  it('skips low-confidence move side effects while storing and auditing the move fact', () => {
+    const oldId = addFact({
+      subject: 'src/legacy/cache.js',
+      predicate: 'contains',
+      object: 'cache adapter',
+      embedding: basis(0),
+    });
+    const moveId = addFact({
+      subject: 'src/cache/adapter.js',
+      predicate: 'now contains',
+      object: 'cache adapter',
+      operation: 'move',
+      from: 'src/legacy/cache.js',
+      to: 'src/cache/adapter.js',
+      confidence: 0.799,
+      embedding: vectorWithCosine(0.87),
+    });
+
+    expect(dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(oldId).status).toBe('active');
+    expect(dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(moveId).status).toBe('active');
+    expect(dbState.db.prepare('SELECT status FROM fact_embeddings WHERE fact_id = ?').get(oldId).status).toBe('active');
+
+    const targetEntity = dbState.db.prepare('SELECT id, aliases_json FROM entities WHERE canonical_name = ?')
+      .get('src/cache/adapter.js');
+    expect(JSON.parse(targetEntity.aliases_json)).not.toContain('src/legacy/cache.js');
+
+    const audit = dbState.db.prepare(`
+      SELECT action, target_type, target_id, detail_json
+      FROM audit_logs
+      WHERE action = 'memory_operation'
+    `).get();
+    expect(audit).toMatchObject({
+      action: 'memory_operation',
+      target_type: 'entity',
+      target_id: targetEntity.id,
+    });
+    expect(JSON.parse(audit.detail_json)).toMatchObject({
+      operation: 'move',
+      result: 'skipped',
+      reason: 'operation_confidence_below_threshold',
+      confidence: 0.799,
+      sourceFactId: moveId,
+      targetFactIds: [],
+      toEntityId: targetEntity.id,
+    });
+  });
+
   it('keeps complementary same-subject semantic facts active', () => {
     const firstId = addFact({
       subject: 'SyncEngine',
@@ -334,6 +442,50 @@ describe('operation fallback without embeddings', () => {
       sourceFactId: newId,
       targetFactId: oldId,
       cosine: null,
+    });
+  });
+
+  it('applies move operation without vector embeddings', () => {
+    const oldId = addFact({
+      subject: 'src/legacy/cache.js',
+      predicate: 'contains',
+      object: 'cache adapter',
+    });
+    const moveId = addFact({
+      subject: 'src/cache/adapter.js',
+      predicate: 'now contains',
+      object: 'cache adapter',
+      operation: 'move',
+      from: 'src/legacy/cache.js',
+      to: 'src/cache/adapter.js',
+      confidence: 0.9,
+    });
+
+    expect(dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(oldId).status).toBe('superseded');
+    expect(dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(moveId).status).toBe('active');
+
+    const targetEntity = dbState.db.prepare('SELECT id, aliases_json FROM entities WHERE canonical_name = ?')
+      .get('src/cache/adapter.js');
+    expect(JSON.parse(targetEntity.aliases_json)).toContain('src/legacy/cache.js');
+
+    const audit = dbState.db.prepare(`
+      SELECT action, target_type, target_id, detail_json
+      FROM audit_logs
+      WHERE action = 'memory_operation'
+    `).get();
+    expect(audit).toMatchObject({
+      action: 'memory_operation',
+      target_type: 'entity',
+      target_id: targetEntity.id,
+    });
+    expect(JSON.parse(audit.detail_json)).toMatchObject({
+      operation: 'move',
+      result: 'applied',
+      action: 'move',
+      confidence: 0.9,
+      sourceFactId: moveId,
+      targetFactIds: [oldId],
+      toEntityId: targetEntity.id,
     });
   });
 });

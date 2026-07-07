@@ -60,6 +60,49 @@ npm view @kiroku/cli version   # 應為 1.7.0
 
 ---
 
+## 場景 B2：遠端 extraction prompt slot 更新（手動啟動）
+
+M3 operation schema 是加法；CLI 先發布後，維護者再手動更新遠端 prompt slot。**不要在 release commit 中自動部署或啟動 slot**，先完成本地/CI 測試與 npm 發布驗收。
+
+目前 Cloudflare Worker prompt API 只有兩個遠端 slot：
+
+| Slot | 來源檔 | 用途 |
+|---|---|---|
+| `default` | `prompts/extraction.md` | 單 turn premium extraction |
+| `batch` | `prompts/extraction-batch.md` | adaptive batch extraction |
+
+`prompts/extraction-basic.md` 是本地 / npm bundle fallback，沒有遠端 slot；更新方式是隨 CLI 發布。
+
+手動更新步驟：
+
+```bash
+API=https://kiroku-api.twampd.workers.dev
+VERSION=m3-operation-semantics-$(date +%Y%m%d)
+
+CONTENT=$(cat prompts/extraction.md | jq -Rs .)
+curl -X POST "$API/prompt/update?slot=default" \
+  -H "Authorization: Bearer $PROMPT_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"content\":${CONTENT},\"version\":\"${VERSION}-default\"}"
+
+CONTENT=$(cat prompts/extraction-batch.md | jq -Rs .)
+curl -X POST "$API/prompt/update?slot=batch" \
+  -H "Authorization: Bearer $PROMPT_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"content\":${CONTENT},\"version\":\"${VERSION}-batch\"}"
+```
+
+啟動後驗證：
+
+```bash
+curl -i "$API/prompt?slot=default" -H "Authorization: Bearer $LICENSE_KEY"
+curl -i "$API/prompt?slot=batch"   -H "Authorization: Bearer $LICENSE_KEY"
+```
+
+確認回應包含預期 `version`、`X-Prompt-Slot` 與 `ETag` 後，再重啟 worker 讓 prompt cache 失效。若需要回退，重新 POST 上一版 prompt；或在本地 `~/.kiroku/config.json` 關閉遠端 prompt provider / 讓 worker 使用 filesystem prompt。
+
+---
+
 ## 場景 C：全新機器全新安裝設定
 
 ### 1. Prerequisites

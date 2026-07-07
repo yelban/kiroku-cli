@@ -4,6 +4,7 @@ import { turnId, entityId, factId, jobId as makeJobId } from '../shared/ids.js';
 import { isVecEnabled } from '../shared/db.js';
 import { writeAudit } from '../shared/audit.js';
 import { loadConfig } from '../shared/config.js';
+import { planMoveOperation } from './move-planner.js';
 import { normalizeSupersedeConfig, resolveSemanticSupersedes } from './supersede-resolver.js';
 
 const log = createLogger('store');
@@ -11,6 +12,7 @@ const MEMORY_OPERATION_ACTIONS = Object.freeze({
   update: 'supersede',
   delete: 'archive',
 });
+const MEMORY_OPERATIONS = new Set(['update', 'delete', 'move']);
 
 function normalizeName(name) {
   return name.toLowerCase().replace(/[-_ ]/g, '');
@@ -117,6 +119,7 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
 
   const now = new Date().toISOString();
   const results = []; // aligned with input facts; null = deduped/skipped
+  const insertedFactIds = new Set();
 
   // Freemium eviction: enforce fact limit
   if (licenseState && !licenseState.licensed) {
@@ -127,7 +130,7 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
     const subjectEntityId = entityMap.get(fact.subject) || null;
     const scope = fact.scope || (fact.fact_type === 'preference' ? 'global' : 'project');
     const operation = normalizeMemoryOperation(fact.operation);
-    const isMemoryOperation = Boolean(MEMORY_OPERATION_ACTIONS[operation]);
+    const isMemoryOperation = MEMORY_OPERATIONS.has(operation);
 
     // Content-level dedup: skip if identical predicate+object+scope already exists
     if (!isMemoryOperation) {
@@ -169,21 +172,39 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
         0.7, now, 0);
 
     writeAudit(d, { projectId, action: 'extract', targetType: 'fact', targetId: fid, detail: { subject: fact.subject, predicate: fact.predicate } });
+    insertedFactIds.add(fid);
     if (isMemoryOperation && !isVecEnabled()) {
-      runExactOperationPass(d, {
-        projectId,
-        sourceFact: {
-          id: fid,
-          subjectEntityId,
-          predicate: fact.predicate,
-          objectText: fact.object,
-          scope,
-          operation,
-          confidence: fact.confidence || 0.5,
-        },
-        config: getSupersedeConfig(),
-        now,
-      });
+      const config = getSupersedeConfig();
+      const sourceFact = {
+        id: fid,
+        subject: fact.subject,
+        subjectEntityId,
+        predicate: fact.predicate,
+        objectText: fact.object,
+        scope,
+        operation,
+        confidence: fact.confidence || 0.5,
+        from: fact.from,
+        to: fact.to,
+      };
+      if (config.enabled) {
+        if (operation === 'move') {
+          runMoveOperationPass(d, {
+            projectId,
+            sourceFact,
+            config,
+            now,
+            excludeFactIds: insertedFactIds,
+          });
+        } else {
+          runExactOperationPass(d, {
+            projectId,
+            sourceFact,
+            config,
+            now,
+          });
+        }
+      }
     }
     results.push(fid);
   }
@@ -224,6 +245,9 @@ export function storeEmbeddings(factIds, embeddings, projectId, facts, supersede
       embedding,
       operation: normalizeMemoryOperation(fact.operation),
       confidence: fact.confidence,
+      from: fact.from,
+      to: fact.to,
+      subject: fact.subject,
     });
   }
 
@@ -253,7 +277,25 @@ function runSemanticSupersedePass(d, insertedFacts, projectId, supersedeConfig) 
       JOIN fact_embeddings fe ON fe.fact_id = f.id
       WHERE f.id = ? AND f.status = 'active' AND fe.status = 'active'
     `).get(inserted.factId);
-    if (!candidate?.subjectEntityId) continue;
+    if (!candidate) continue;
+    if (inserted.operation === 'move') {
+      runMoveOperationPass(d, {
+        projectId,
+        sourceFact: {
+          ...candidate,
+          subject: inserted.subject,
+          operation: inserted.operation,
+          confidence: candidate.confidence,
+          from: inserted.from,
+          to: inserted.to,
+        },
+        config,
+        now,
+        excludeFactIds: insertedIds,
+      });
+      continue;
+    }
+    if (!candidate.subjectEntityId) continue;
 
     const rows = selectSemanticSupersedeTargets(d, {
       projectId,
@@ -357,6 +399,119 @@ function runExactOperationPass(d, { projectId, sourceFact, config, now }) {
   writeOperationAudit(d, { projectId, decision, result: 'applied' });
 }
 
+function runMoveOperationPass(d, { projectId, sourceFact, config, now, excludeFactIds = new Set() }) {
+  const { fromEntity, toEntity } = resolveMoveEntities(d, sourceFact);
+  const fromFacts = fromEntity
+    ? selectMoveSourceFacts(d, {
+        projectId,
+        scope: sourceFact.scope,
+        fromEntityId: fromEntity.id,
+        sourceFactId: sourceFact.id,
+        excludeFactIds,
+      })
+    : [];
+  const decision = planMoveOperation({
+    sourceFact,
+    fromEntity,
+    toEntity,
+    fromFacts,
+    operationConfidenceThreshold: config.operationConfidenceThreshold,
+  });
+
+  if (decision.action === 'skip') {
+    writeOperationAudit(d, { projectId, decision, result: 'skipped' });
+    return;
+  }
+
+  for (const item of decision.supersedeFacts) {
+    applyFactStatus(d, item.factId, item.status, now);
+    syncFactEmbeddingStatus(d, item.factId, item.status);
+  }
+
+  applyAliasMerge(d, decision.aliasMerge, now);
+  writeOperationAudit(d, { projectId, decision, result: 'applied' });
+}
+
+function resolveMoveEntities(d, sourceFact) {
+  const fromEntity = selectMoveEntity(d, {
+    endpoint: sourceFact.from,
+    fallbackEntityId: sourceFact.fromEntityId,
+  });
+  const toEntity = selectMoveEntity(d, {
+    endpoint: sourceFact.to,
+    fallbackEntityId: sourceFact.toEntityId,
+  }) || selectMoveEntity(d, {
+    endpoint: sourceFact.subject,
+    fallbackEntityId: sourceFact.subjectEntityId,
+  });
+
+  return { fromEntity, toEntity };
+}
+
+function selectMoveEntity(d, { endpoint, fallbackEntityId }) {
+  const name = moveEndpointName(endpoint);
+  if (name) {
+    const exact = d.prepare(`
+      SELECT id, canonical_name AS canonicalName, aliases_json AS aliasesJson
+      FROM entities
+      WHERE canonical_name = ?
+      LIMIT 1
+    `).get(name);
+    if (exact) return exact;
+
+    const normalized = normalizeName(name);
+    const byNormalized = d.prepare(`
+      SELECT id, canonical_name AS canonicalName, aliases_json AS aliasesJson
+      FROM entities
+      WHERE normalized_name = ?
+      LIMIT 1
+    `).get(normalized);
+    if (byNormalized) return byNormalized;
+  }
+
+  if (!fallbackEntityId) return null;
+  return d.prepare(`
+    SELECT id, canonical_name AS canonicalName, aliases_json AS aliasesJson
+    FROM entities
+    WHERE id = ?
+    LIMIT 1
+  `).get(fallbackEntityId) || null;
+}
+
+function selectMoveSourceFacts(d, { projectId, scope, fromEntityId, sourceFactId, excludeFactIds }) {
+  const factScope = scope || 'project';
+  const scopeClause = factScope === 'global'
+    ? `scope = 'global'`
+    : `project_id = ? AND scope = ?`;
+  const params = factScope === 'global'
+    ? [fromEntityId]
+    : [projectId, factScope, fromEntityId];
+  const excluded = new Set([sourceFactId, ...excludeFactIds].filter(Boolean));
+
+  return d.prepare(`
+    SELECT id, status
+    FROM facts
+    WHERE ${scopeClause}
+      AND subject_entity_id = ?
+      AND status = 'active'
+  `).all(...params).filter(row => !excluded.has(row.id));
+}
+
+function applyAliasMerge(d, aliasMerge, now) {
+  if (!aliasMerge?.targetEntityId || aliasMerge.addedAliases.length === 0) return;
+  d.prepare('UPDATE entities SET aliases_json = ?, updated_at = ? WHERE id = ?')
+    .run(JSON.stringify(aliasMerge.aliases), now, aliasMerge.targetEntityId);
+}
+
+function syncFactEmbeddingStatus(d, factId, status) {
+  if (!isVecEnabled()) return;
+  try {
+    d.prepare(`UPDATE fact_embeddings SET status = ? WHERE fact_id = ?`).run(status, factId);
+  } catch {
+    // In-memory non-vec tests skip the vec migrations.
+  }
+}
+
 function selectExactOperationTarget(d, { projectId, sourceFact }) {
   if (!sourceFact.subjectEntityId) return null;
 
@@ -446,8 +601,8 @@ function writeOperationAudit(d, { projectId, decision, result }) {
   writeAudit(d, {
     projectId,
     action: 'memory_operation',
-    targetType: 'fact',
-    targetId: decision.targetFactId,
+    targetType: decision.targetType || 'fact',
+    targetId: decision.targetId ?? decision.targetFactId,
     detail: {
       operation: decision.operation,
       result,
@@ -457,6 +612,10 @@ function writeOperationAudit(d, { projectId, decision, result }) {
       operationConfidenceThreshold: decision.operationConfidenceThreshold,
       sourceFactId: decision.sourceFactId,
       targetFactId: decision.targetFactId,
+      targetFactIds: decision.targetFactIds,
+      fromEntityId: decision.fromEntityId,
+      toEntityId: decision.toEntityId,
+      addedAliases: decision.aliasMerge?.addedAliases,
       cosine: roundCosine(decision.cosine),
       threshold: decision.threshold,
     },
@@ -480,6 +639,12 @@ function roundCosine(value) {
 
 function normalizeMemoryOperation(operation) {
   return String(operation ?? 'add').toLowerCase().trim() || 'add';
+}
+
+function moveEndpointName(endpoint) {
+  if (!endpoint) return null;
+  if (typeof endpoint === 'string') return endpoint;
+  return endpoint.canonical_name ?? endpoint.canonicalName ?? endpoint.name ?? null;
 }
 
 function confidenceOf(fact) {

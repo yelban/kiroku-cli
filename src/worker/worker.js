@@ -263,6 +263,7 @@ async function processFile(filename, config) {
         embeddings,
         event.project_id,
         inserted.map(p => p.fact),
+        config.worker.supersede,
       );
     }
 
@@ -469,6 +470,7 @@ async function persistBatchTurn(item, turn, config) {
       embeddings,
       projectId,
       inserted.map(p => p.fact),
+      config.worker.supersede,
     );
   }
 

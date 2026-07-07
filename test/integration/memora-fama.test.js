@@ -83,8 +83,9 @@ const scoreState = {
 };
 
 // Measured M1-3 mixed-ranking baseline: 0.673797 -> 0.764706.
+// M2-2 semantic supersede baseline: 0.764706 -> 0.882353.
 // Update only when a memory-behavior change intentionally changes the mini-FAMA score and the new baseline is reviewed.
-const BASELINE_FAMA_FLOOR = 0.764706;
+const BASELINE_FAMA_FLOOR = 0.882353;
 
 function createMemoraDb() {
   const db = new Database(':memory:');
@@ -135,6 +136,19 @@ function vector(components) {
 function basis(index) {
   return vector([[index, 1]]);
 }
+
+function pairedVector(index, cosine) {
+  return vector([[index, cosine], [index + 500, Math.sqrt(1 - cosine * cosine)]]);
+}
+
+// Repo embedder measured with Xenova/bge-m3 q8 over `${subject} ${predicate} ${object}` pairs.
+// Fixtures stay within ±0.02 of measured cosine while avoiding Float32 threshold edges.
+const BGE_M3_FIXTURE_COSINES = {
+  q02DecisionReplacement: 0.59, // measured 0.580401
+  q03FixedStateBug: 0.81,       // measured 0.801553
+  q04RemovedDependency: 0.84,   // measured 0.841521
+  q05MovedFile: 0.87,           // measured 0.867245
+};
 
 function registerQueryVector(query, embedding) {
   embedderState.vectors.set(query, embedding);
@@ -351,14 +365,15 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     });
   });
 
-  test.fails('02 paraphrased decision replacement excludes the old decision', async () => {
+  test('02 paraphrased decision replacement excludes the old decision', async () => {
     await evaluateQuestion({
       id: '02',
       title: 'paraphrased decision replacement',
-      expected: 'test.fails',
+      expected: 'pass',
     }, async ({ criterion }) => {
       const query = 'storage decision';
       const queryVector = basis(2);
+      const replacementVector = pairedVector(2, BGE_M3_FIXTURE_COSINES.q02DecisionReplacement);
       registerQueryVector(query, queryVector);
 
       addFact({
@@ -372,7 +387,7 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
         subject: 'PersistenceLayer',
         predicate: 'standardizes on database',
         object: 'SQLite',
-        embedding: queryVector,
+        embedding: replacementVector,
         createdAt: '2026-03-03T10:00:00.000Z',
       });
 
@@ -382,14 +397,15 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     });
   });
 
-  test.fails('03 fixed state bug excludes the broken-state fact', async () => {
+  test('03 fixed state bug excludes the broken-state fact', async () => {
     await evaluateQuestion({
       id: '03',
       title: 'fixed state bug',
-      expected: 'test.fails',
+      expected: 'pass',
     }, async ({ criterion }) => {
       const query = 'oauth callback bug status';
       const queryVector = basis(3);
+      const fixedVector = pairedVector(3, BGE_M3_FIXTURE_COSINES.q03FixedStateBug);
       registerQueryVector(query, queryVector);
 
       addFact({
@@ -405,7 +421,7 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
         predicate: 'was fixed by',
         object: 'guarding the missing state parameter',
         factType: 'state',
-        embedding: queryVector,
+        embedding: fixedVector,
         createdAt: '2026-03-04T10:00:00.000Z',
       });
 
@@ -423,6 +439,7 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     }, async ({ criterion }) => {
       const query = 'left-pad dependency';
       const queryVector = basis(4);
+      const removalVector = pairedVector(4, BGE_M3_FIXTURE_COSINES.q04RemovedDependency);
       registerQueryVector(query, queryVector);
 
       addFact({
@@ -436,7 +453,7 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
         subject: 'package.json',
         predicate: 'removed dependency',
         object: 'left-pad',
-        embedding: queryVector,
+        embedding: removalVector,
         createdAt: '2026-03-05T10:00:00.000Z',
       });
 
@@ -454,6 +471,7 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     }, async ({ criterion }) => {
       const query = 'cache adapter file path';
       const queryVector = basis(5);
+      const newPathVector = pairedVector(5, BGE_M3_FIXTURE_COSINES.q05MovedFile);
       registerQueryVector(query, queryVector);
 
       addFact({
@@ -467,7 +485,7 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
         subject: 'src/cache/adapter.js',
         predicate: 'now contains',
         object: 'cache adapter',
-        embedding: queryVector,
+        embedding: newPathVector,
         createdAt: '2026-03-06T10:00:00.000Z',
       });
 

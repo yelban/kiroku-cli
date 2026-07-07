@@ -88,6 +88,11 @@ const ConfigSchema = z.object({
       dimensions: z.number().default(1024),
       batchSize: z.number().default(16),
     }).default({}),
+    supersede: z.object({
+      enabled: z.boolean().default(true),
+      semanticThreshold: z.number().default(0.58),
+      stateTaskThreshold: z.number().default(0.8),
+    }).default({}),
     decay: z.object({
       enabled: z.boolean().default(true),
       sweepIntervalMs: z.number().default(21600000), // 6h

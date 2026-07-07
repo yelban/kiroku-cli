@@ -3,6 +3,8 @@ import { createLogger } from '../shared/logger.js';
 import { turnId, entityId, factId, jobId as makeJobId } from '../shared/ids.js';
 import { isVecEnabled } from '../shared/db.js';
 import { writeAudit } from '../shared/audit.js';
+import { loadConfig } from '../shared/config.js';
+import { normalizeSupersedeConfig, resolveSemanticSupersedes } from './supersede-resolver.js';
 
 const log = createLogger('store');
 
@@ -165,7 +167,7 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
   return results;
 }
 
-export function storeEmbeddings(factIds, embeddings, projectId, facts) {
+export function storeEmbeddings(factIds, embeddings, projectId, facts, supersedeConfig) {
   if (!isVecEnabled()) {
     log.debug('vec not available, skipping embeddings');
     return;
@@ -177,14 +179,144 @@ export function storeEmbeddings(factIds, embeddings, projectId, facts) {
   const stmt = d.prepare(
     `INSERT INTO fact_embeddings (fact_id, project_id, scope, fact_type, status, embedding) VALUES (?, ?, ?, ?, ?, ?)`
   );
+  const inserted = [];
 
   for (let i = 0; i < factIds.length; i++) {
     if (i >= embeddings.length) break;
     const fact = facts[i] || {};
     const scope = fact.scope || (fact.fact_type === 'preference' ? 'global' : 'project');
     const embedding = new Float32Array(embeddings[i]);
-    stmt.run(factIds[i], projectId, scope, fact.fact_type || 'semantic', 'active', Buffer.from(embedding.buffer));
+    stmt.run(
+      factIds[i],
+      projectId,
+      scope,
+      fact.fact_type || 'semantic',
+      'active',
+      Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength),
+    );
+    inserted.push({ factId: factIds[i], embedding });
   }
+
+  runSemanticSupersedePass(d, inserted, projectId, supersedeConfig);
+}
+
+function runSemanticSupersedePass(d, insertedFacts, projectId, supersedeConfig) {
+  if (insertedFacts.length === 0) return;
+
+  const config = getSupersedeConfig(supersedeConfig);
+  if (!config.enabled) return;
+
+  const insertedIds = new Set(insertedFacts.map(item => item.factId));
+  const now = new Date().toISOString();
+
+  for (const inserted of insertedFacts) {
+    const candidate = d.prepare(`
+      SELECT
+        f.id,
+        f.subject_entity_id AS subjectEntityId,
+        f.predicate,
+        f.object_text AS objectText,
+        f.fact_type AS factType,
+        f.scope
+      FROM facts f
+      JOIN fact_embeddings fe ON fe.fact_id = f.id
+      WHERE f.id = ? AND f.status = 'active' AND fe.status = 'active'
+    `).get(inserted.factId);
+    if (!candidate?.subjectEntityId) continue;
+
+    const rows = selectSemanticSupersedeTargets(d, {
+      projectId,
+      scope: candidate.scope,
+      subjectEntityId: candidate.subjectEntityId,
+      factId: candidate.id,
+    }).filter(row => !insertedIds.has(row.id));
+
+    const activeFacts = rows.map(row => ({
+      ...row,
+      embedding: embeddingFromDb(row.embedding),
+    }));
+    const decisions = resolveSemanticSupersedes(
+      { ...candidate, embedding: inserted.embedding },
+      activeFacts,
+      config,
+    );
+
+    for (const decision of decisions) {
+      if (decision.action !== 'supersede' && decision.action !== 'archive') continue;
+
+      const status = decision.action === 'archive' ? 'archived' : 'superseded';
+      if (status === 'archived') {
+        d.prepare(`UPDATE facts SET status = ?, decay_bucket = 'archived', updated_at = ? WHERE id = ? AND status = 'active'`)
+          .run(status, now, decision.targetFactId);
+      } else {
+        d.prepare(`UPDATE facts SET status = ?, updated_at = ? WHERE id = ? AND status = 'active'`)
+          .run(status, now, decision.targetFactId);
+      }
+      d.prepare(`UPDATE fact_embeddings SET status = ? WHERE fact_id = ?`).run(status, decision.targetFactId);
+      writeAudit(d, {
+        projectId,
+        action: 'semantic_supersede',
+        targetType: 'fact',
+        targetId: decision.targetFactId,
+        detail: {
+          action: decision.action,
+          sourceFactId: decision.sourceFactId,
+          targetFactId: decision.targetFactId,
+          cosine: roundCosine(decision.cosine),
+          threshold: decision.threshold,
+        },
+      });
+    }
+  }
+}
+
+function getSupersedeConfig(supersedeConfig) {
+  if (supersedeConfig) return normalizeSupersedeConfig(supersedeConfig);
+  try {
+    return normalizeSupersedeConfig(loadConfig().worker?.supersede);
+  } catch {
+    return normalizeSupersedeConfig();
+  }
+}
+
+function selectSemanticSupersedeTargets(d, { projectId, scope, subjectEntityId, factId: currentFactId }) {
+  const scopeClause = scope === 'global'
+    ? `f.scope = 'global'`
+    : `f.project_id = ? AND f.scope = ?`;
+  const params = scope === 'global'
+    ? [subjectEntityId, currentFactId]
+    : [projectId, scope, subjectEntityId, currentFactId];
+
+  return d.prepare(`
+    SELECT
+      f.id,
+      f.subject_entity_id AS subjectEntityId,
+      f.predicate,
+      f.object_text AS objectText,
+      f.fact_type AS factType,
+      fe.embedding
+    FROM facts f
+    JOIN fact_embeddings fe ON fe.fact_id = f.id
+    WHERE ${scopeClause}
+      AND f.subject_entity_id = ?
+      AND f.id != ?
+      AND f.status = 'active'
+      AND fe.status = 'active'
+  `).all(...params);
+}
+
+function embeddingFromDb(value) {
+  if (!value) return null;
+  if (Array.isArray(value) || value instanceof Float32Array) return value;
+  if (ArrayBuffer.isView(value)) {
+    return new Float32Array(value.buffer, value.byteOffset, value.byteLength / Float32Array.BYTES_PER_ELEMENT);
+  }
+  if (value instanceof ArrayBuffer) return new Float32Array(value);
+  return null;
+}
+
+function roundCosine(value) {
+  return Number(value.toFixed(6));
 }
 
 export function createExtractionJob(jid, queueFile, eventId) {

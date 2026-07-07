@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+#### Semantic Supersede
+- New extracted fact embeddings now run a post-store semantic supersede pass against active facts with the same subject and scope. Matching semantic/decision/episodic facts are marked `superseded`; matching `state`/`task` facts are marked `archived`, with `fact_embeddings.status` kept in sync and a `semantic_supersede` audit row written for each action.
+- Added `worker.supersede.{enabled, semanticThreshold, stateTaskThreshold}`. Defaults are calibrated from the mini-FAMA bge-m3 fixtures at `enabled=true`, `semanticThreshold=0.58`, and `stateTaskThreshold=0.8`.
+- To restore exact-match-only supersede behavior, set `worker.supersede.enabled` to `false`.
+
 #### Memory Freshness Metadata
 - `project_context` brief lines now end with compact `created_at` age markers: `(Nd)` for facts younger than 14 days, `(Nw)` for facts younger than 70 days, and `(Nmo)` for older facts. Missing or unparseable timestamps are omitted.
 - `memory_search` now labels non-active result sets with `**⚠ Historical facts (status=...) — NOT current state**` and adds a `Status` column to the table. The default `status=active` output remains byte-for-byte unchanged.

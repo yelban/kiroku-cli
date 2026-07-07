@@ -565,12 +565,13 @@ function cosineSimilarity(a, b) {
   return dot; // vectors are normalized, so dot product = cosine
 }
 
-export async function runCompactionSweep(db, opts = {}) {
+export async function runCompactionSweep(db, opts = {}, decayConfig = {}) {
   if (!isVecEnabled()) return { merged: 0, conflicts: 0 };
 
   const yieldEveryGroup = opts.yieldEvery ?? 1;       // yield between groups (default: every group)
   const yieldEveryEmb = opts.yieldEveryEmb ?? 50;     // yield mid-group during embedding loads
   const yieldEveryPair = opts.yieldEveryPair ?? 200;  // yield mid-group during O(N^2) cosine
+  const floorByType = decayConfig?.floorByType || {};
   const tick = () => new Promise(setImmediate);
 
   const now = new Date().toISOString();
@@ -592,7 +593,7 @@ export async function runCompactionSweep(db, opts = {}) {
       await tick();
     }
     const facts = db.prepare(`
-      SELECT f.id, f.predicate, f.object_text, f.heat, f.base_heat, f.created_at
+      SELECT f.id, f.project_id, f.predicate, f.object_text, f.fact_type, f.heat, f.base_heat, f.created_at
       FROM facts f
       WHERE f.subject_entity_id = ? AND f.status = 'active'
       ORDER BY f.heat DESC
@@ -648,6 +649,7 @@ export async function runCompactionSweep(db, opts = {}) {
               objectA: facts[i].object_text, objectB: facts[j].object_text,
               cosine: cosine.toFixed(3),
             }, 'potential fact conflict detected');
+            demoteConflictFacts(db, facts[i], facts[j], cosine, floorByType, now);
             conflicts++;
           }
         }
@@ -657,6 +659,55 @@ export async function runCompactionSweep(db, opts = {}) {
 
   log.info({ merged, conflicts }, 'compaction sweep complete');
   return { merged, conflicts };
+}
+
+function demoteConflictFacts(db, factA, factB, cosine, floorByType, now) {
+  const tx = db.transaction(() => {
+    demoteConflictFact(db, factA, factB, cosine, floorByType, now);
+    demoteConflictFact(db, factB, factA, cosine, floorByType, now);
+  });
+  tx();
+}
+
+function demoteConflictFact(db, fact, conflictingFact, cosine, floorByType, now) {
+  const current = db.prepare(`
+    SELECT id, project_id, predicate, object_text, fact_type, heat, base_heat
+    FROM facts
+    WHERE id = ? AND status = 'active'
+  `).get(fact.id);
+  if (!current) return;
+
+  const floor = floorByType[current.fact_type] ?? 0;
+  const heatAfter = Math.max(floor, current.heat * 0.5);
+  const baseHeatAfter = Math.max(floor, current.base_heat * 0.5);
+
+  db.prepare(`
+    UPDATE facts
+    SET heat = ?, base_heat = ?, updated_at = ?
+    WHERE id = ? AND status = 'active'
+  `).run(heatAfter, baseHeatAfter, now, current.id);
+
+  fact.heat = heatAfter;
+  fact.base_heat = baseHeatAfter;
+
+  writeAudit(db, {
+    projectId: current.project_id,
+    action: 'conflict_demote',
+    targetType: 'fact',
+    targetId: current.id,
+    detail: {
+      cosine: roundCosine(cosine),
+      conflictingFactId: conflictingFact.id,
+      predicate: current.predicate,
+      object: current.object_text,
+      conflictingObject: conflictingFact.object_text,
+      heatBefore: current.heat,
+      heatAfter,
+      baseHeatBefore: current.base_heat,
+      baseHeatAfter,
+      floor,
+    },
+  });
 }
 
 export function boostFactHeat(factIds, boost = 0.05) {

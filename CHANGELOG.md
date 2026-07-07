@@ -12,6 +12,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Added `worker.supersede.{enabled, semanticThreshold, stateTaskThreshold}`. Defaults are calibrated from the mini-FAMA bge-m3 fixtures at `enabled=true`, `semanticThreshold=0.58`, and `stateTaskThreshold=0.8`.
 - To restore exact-match-only supersede behavior, set `worker.supersede.enabled` to `false`.
 
+#### Compaction
+- Compaction conflict detection now demotes both active facts in a same-subject, same-predicate, different-object conflict by halving `heat` and `base_heat` down to the configured decay floor, and writes `conflict_demote` audit rows for the affected facts.
+
 #### Memory Freshness Metadata
 - `project_context` brief lines now end with compact `created_at` age markers: `(Nd)` for facts younger than 14 days, `(Nw)` for facts younger than 70 days, and `(Nmo)` for older facts. Missing or unparseable timestamps are omitted.
 - `memory_search` now labels non-active result sets with `**⚠ Historical facts (status=...) — NOT current state**` and adds a `Status` column to the table. The default `status=active` output remains byte-for-byte unchanged.

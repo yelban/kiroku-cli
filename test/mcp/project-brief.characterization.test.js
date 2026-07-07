@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createMemoryTestDb, seedMemoryFact } from './memory-fixtures.js';
 import {
   getProjectBrief,
@@ -42,19 +42,22 @@ function seedBriefScenario(db) {
 
 const expectedBriefMarkdown = `# Project Memory Brief (3 facts)
 
-[preference] user prefers Bun [global]
-[semantic] Project uses SQLite \u2014 Fast local store
-[task] CLI should ship M1-1`;
+[preference] user prefers Bun [global] (1d)
+[semantic] Project uses SQLite \u2014 Fast local store (1d)
+[task] CLI should ship M1-1 (1d)`;
 
 describe('getProjectBrief characterization', () => {
   let db;
 
   beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-07T12:00:00.000Z'));
     db = createMemoryTestDb();
   });
 
   afterEach(() => {
     db?.close();
+    vi.useRealTimers();
   });
 
   it('preserves the current markdown brief output', () => {

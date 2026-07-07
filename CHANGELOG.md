@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+#### Memory Freshness Metadata
+- `project_context` brief lines now end with compact `created_at` age markers: `(Nd)` for facts younger than 14 days, `(Nw)` for facts younger than 70 days, and `(Nmo)` for older facts. Missing or unparseable timestamps are omitted.
+- `memory_search` now labels non-active result sets with `**⚠ Historical facts (status=...) — NOT current state**` and adds a `Status` column to the table. The default `status=active` output remains byte-for-byte unchanged.
+
 #### Memory Search Ranking
 - `memory_search` now reranks over-fetched candidates with `score = w_sim * sim + w_heat * heat + w_rec * recency`, where `recency = 0.5^(age_days / halfLifeDays)` and age is computed from `created_at`.
 - Default ranking weights are `simWeight=0.65`, `heatWeight=0.15`, `recencyWeight=0.20`, and `halfLifeDays=30`, so newer hot facts can outrank older facts with only slightly better vector similarity.

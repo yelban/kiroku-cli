@@ -24,7 +24,7 @@ function ensureStoreDb() {
 export async function memorySearch(params) {
   const rows = await selectMemorySearchRows(params);
   boostSearchRows(rows);
-  return renderMemorySearchRows(rows);
+  return renderMemorySearchRows(rows, params?.status ?? 'active');
 }
 
 export async function selectMemorySearchRows(params) {
@@ -243,13 +243,24 @@ function boostSearchRows(rows) {
   } catch (err) { log.debug({ err: err.message }, 'boost failed'); }
 }
 
-export function renderMemorySearchRows(rows) {
+export function renderMemorySearchRows(rows, status = 'active') {
   if (rows.length === 0) return 'No matching facts found.';
-  let md = `| Subject | Predicate | Object | Type | Scope | Conf | Date |\n|---|---|---|---|---|---|---|\n`;
+  const historical = status !== 'active';
+  const statusText = String(status);
+  let md = historical
+    ? `**⚠ Historical facts (status=${statusText}) — NOT current state**\n\n`
+    : '';
+  md += historical
+    ? `| Subject | Predicate | Object | Type | Scope | Status | Conf | Date |\n|---|---|---|---|---|---|---|---|\n`
+    : `| Subject | Predicate | Object | Type | Scope | Conf | Date |\n|---|---|---|---|---|---|---|\n`;
   for (const r of rows) {
     const s = trunc(r.subject || '?', 30), p = trunc(r.predicate, 25), o = trunc(r.object_text, 50);
     const sc = r.scope || 'project';
-    md += `| ${s} | ${p} | ${o} | ${r.fact_type} | ${sc} | ${r.confidence} | ${(r.created_at || '').substring(0, 10)} |\n`;
+    if (historical) {
+      md += `| ${s} | ${p} | ${o} | ${r.fact_type} | ${sc} | ${trunc(statusText, 20)} | ${r.confidence} | ${(r.created_at || '').substring(0, 10)} |\n`;
+    } else {
+      md += `| ${s} | ${p} | ${o} | ${r.fact_type} | ${sc} | ${r.confidence} | ${(r.created_at || '').substring(0, 10)} |\n`;
+    }
   }
   const withDetail = rows.filter(r => r.object_detail);
   if (withDetail.length > 0) {

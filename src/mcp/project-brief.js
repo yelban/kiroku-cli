@@ -1,3 +1,7 @@
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const DAYS_PER_WEEK = 7;
+const DAYS_PER_MONTH = 30;
+
 function tokenize(text) {
   return new Set(text.toLowerCase().split(/\s+/).filter(w => w.length > 1));
 }
@@ -28,7 +32,23 @@ function estimateTokens(line) {
 function formatLine(r) {
   const detail = r.object_detail ? ` — ${r.object_detail}` : '';
   const scope = r.scope === 'global' ? ' [global]' : '';
-  return `[${r.fact_type}] ${r.subject || '?'} ${r.predicate} ${r.object_text}${detail}${scope}`;
+  const age = formatAgeMarker(r.created_at);
+  return `[${r.fact_type}] ${r.subject || '?'} ${r.predicate} ${r.object_text}${detail}${scope}${age}`;
+}
+
+function formatAgeMarker(createdAt) {
+  if (!createdAt) return '';
+  const createdMs = Date.parse(createdAt);
+  if (!Number.isFinite(createdMs)) return '';
+
+  const ageDays = Math.max(0, (Date.now() - createdMs) / MS_PER_DAY);
+  if (ageDays < 14) return ` (${roundedAge(ageDays)}d)`;
+  if (ageDays < 70) return ` (${roundedAge(ageDays / DAYS_PER_WEEK)}w)`;
+  return ` (${roundedAge(ageDays / DAYS_PER_MONTH)}mo)`;
+}
+
+function roundedAge(value) {
+  return Math.max(1, Math.round(value));
 }
 
 export function getProjectBrief(db, projectId, config) {

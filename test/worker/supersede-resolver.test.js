@@ -112,6 +112,108 @@ describe('resolveSemanticSupersedes', () => {
     })]);
   });
 
+  it('lets update operation waive the same-object guard and supersede the target', () => {
+    const decisions = resolveSemanticSupersedes({
+      ...candidateBase,
+      predicate: 'records current dependency',
+      objectText: 'left-pad',
+      operation: 'update',
+      confidence: 0.8,
+      embedding: [1, 0],
+    }, [{
+      ...targetBase,
+      predicate: 'depends on',
+      objectText: 'left-pad',
+      embedding: vectorWithCosine(0.58),
+    }], {
+      semanticThreshold: 0.58,
+      stateTaskThreshold: 0.8,
+    });
+
+    expect(decisions[0]).toMatchObject({
+      action: 'supersede',
+      operation: 'update',
+      confidence: 0.8,
+      targetFactId: 'fact_old',
+      threshold: 0.58,
+    });
+    expect(decisions[0].cosine).toBeCloseTo(0.58);
+  });
+
+  it('lets delete operation waive replacement-signal and same-object guards and archive the target', () => {
+    const decisions = resolveSemanticSupersedes({
+      ...candidateBase,
+      predicate: 'documents removal',
+      objectText: 'left-pad',
+      operation: 'delete',
+      confidence: 0.9,
+      embedding: [1, 0],
+    }, [{
+      ...targetBase,
+      predicate: 'depends on',
+      objectText: 'left-pad',
+      embedding: vectorWithCosine(0.84),
+    }], {
+      semanticThreshold: 0.58,
+      stateTaskThreshold: 0.8,
+    });
+
+    expect(decisions[0]).toMatchObject({
+      action: 'archive',
+      operation: 'delete',
+      confidence: 0.9,
+      targetFactId: 'fact_old',
+      threshold: 0.58,
+    });
+    expect(decisions[0].cosine).toBeCloseTo(0.84);
+  });
+
+  it('uses an inclusive 0.8 confidence gate for operation decisions', () => {
+    const operationCandidate = {
+      ...candidateBase,
+      predicate: 'marks stale dependency',
+      objectText: 'left-pad',
+      operation: 'delete',
+      embedding: [1, 0],
+    };
+    const operationTarget = {
+      ...targetBase,
+      predicate: 'depends on',
+      objectText: 'left-pad',
+      embedding: vectorWithCosine(0.84),
+    };
+
+    const atGate = resolveSemanticSupersedes({
+      ...operationCandidate,
+      confidence: 0.8,
+    }, [operationTarget], {
+      semanticThreshold: 0.58,
+      stateTaskThreshold: 0.8,
+    });
+    const belowGate = resolveSemanticSupersedes({
+      ...operationCandidate,
+      confidence: 0.799,
+    }, [operationTarget], {
+      semanticThreshold: 0.58,
+      stateTaskThreshold: 0.8,
+    });
+
+    expect(atGate[0]).toMatchObject({
+      action: 'archive',
+      operation: 'delete',
+      confidence: 0.8,
+    });
+    expect(belowGate[0]).toMatchObject({
+      action: 'skip',
+      reason: 'operation_confidence_below_threshold',
+      operation: 'delete',
+      confidence: 0.799,
+      operationConfidenceThreshold: 0.8,
+      targetFactId: 'fact_old',
+    });
+    expect(belowGate[0].cosine).toBeCloseTo(0.84);
+  });
+
   it('degrades to no semantic decisions without embeddings', () => {
     expect(resolveSemanticSupersedes({ ...candidateBase, embedding: null }, [targetBase])).toEqual([]);
     expect(resolveSemanticSupersedes(candidateBase, [{ ...targetBase, embedding: null }])).toEqual([

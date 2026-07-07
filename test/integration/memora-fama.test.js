@@ -84,8 +84,9 @@ const scoreState = {
 
 // Measured M1-3 mixed-ranking baseline: 0.673797 -> 0.764706.
 // M2-2 semantic supersede baseline: 0.764706 -> 0.882353.
+// M3-1 update/delete operation baseline: 0.882353 -> 0.941176.
 // Update only when a memory-behavior change intentionally changes the mini-FAMA score and the new baseline is reviewed.
-const BASELINE_FAMA_FLOOR = 0.882353;
+const BASELINE_FAMA_FLOOR = 0.941176;
 
 function createMemoraDb() {
   const db = new Database(':memory:');
@@ -166,6 +167,7 @@ function addFact({
   detail = null,
   factType = 'semantic',
   confidence = 1,
+  operation,
   scope,
   projectId = PROJECT_ID,
   embedding,
@@ -184,6 +186,7 @@ function addFact({
     detail,
     fact_type: factType,
     confidence,
+    operation,
     scope,
   };
   const [factId] = storeFacts([fact], entityMap, projectId, null, null);
@@ -199,6 +202,8 @@ function addFact({
   if (embedding) {
     storeEmbeddings([factId], [embedding], projectId, [{
       fact_type: factType,
+      operation,
+      confidence,
       scope,
     }]);
   }
@@ -431,11 +436,11 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     });
   });
 
-  test.fails('04 removed dependency excludes the stale dependency fact', async () => {
+  test('04 removed dependency excludes the stale dependency fact', async () => {
     await evaluateQuestion({
       id: '04',
       title: 'removed dependency',
-      expected: 'test.fails',
+      expected: 'pass',
     }, async ({ criterion }) => {
       const query = 'left-pad dependency';
       const queryVector = basis(4);
@@ -453,6 +458,8 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
         subject: 'package.json',
         predicate: 'removed dependency',
         object: 'left-pad',
+        operation: 'delete',
+        confidence: 0.9,
         embedding: removalVector,
         createdAt: '2026-03-05T10:00:00.000Z',
       });

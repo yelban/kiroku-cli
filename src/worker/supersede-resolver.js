@@ -2,9 +2,14 @@ export const DEFAULT_SUPERSEDE_CONFIG = Object.freeze({
   enabled: true,
   semanticThreshold: 0.58,
   stateTaskThreshold: 0.8,
+  operationConfidenceThreshold: 0.8,
 });
 
 const STATE_TASK_TYPES = new Set(['state', 'task']);
+const OPERATION_ACTIONS = Object.freeze({
+  update: 'supersede',
+  delete: 'archive',
+});
 const REPLACEMENT_CUES = [
   'standardize',
   'standardizes',
@@ -72,6 +77,10 @@ export function normalizeSupersedeConfig(config = {}) {
       config.stateTaskThreshold,
       DEFAULT_SUPERSEDE_CONFIG.stateTaskThreshold,
     ),
+    operationConfidenceThreshold: finiteNumberOrDefault(
+      config.operationConfidenceThreshold,
+      DEFAULT_SUPERSEDE_CONFIG.operationConfidenceThreshold,
+    ),
   };
 }
 
@@ -85,6 +94,9 @@ export function resolveSemanticSupersedes(candidate, activeFacts = [], config = 
 function resolveOne(candidate, target, config) {
   const targetFactId = target?.id ?? target?.fact_id ?? target?.factId ?? null;
   const sourceFactId = candidate?.id ?? candidate?.fact_id ?? candidate?.factId ?? null;
+  const operation = operationOf(candidate);
+  const operationAction = OPERATION_ACTIONS[operation] ?? null;
+  const confidence = confidenceOf(candidate);
   const baseDecision = { action: 'none', sourceFactId, targetFactId };
 
   if (!target || targetFactId === sourceFactId) {
@@ -93,7 +105,7 @@ function resolveOne(candidate, target, config) {
   if (!sameSubject(candidate, target)) {
     return { ...baseDecision, reason: 'different_subject' };
   }
-  if (objectTextOf(candidate) === objectTextOf(target)) {
+  if (!operationAction && objectTextOf(candidate) === objectTextOf(target)) {
     return { ...baseDecision, reason: 'same_object' };
   }
   if (!hasEmbedding(target.embedding)) {
@@ -109,6 +121,33 @@ function resolveOne(candidate, target, config) {
   if (cosine < threshold) {
     return { ...baseDecision, reason: 'below_threshold', cosine, threshold };
   }
+  if (operationAction) {
+    if (confidence < config.operationConfidenceThreshold) {
+      return {
+        action: 'skip',
+        reason: 'operation_confidence_below_threshold',
+        operation,
+        confidence,
+        operationConfidenceThreshold: config.operationConfidenceThreshold,
+        sourceFactId,
+        targetFactId,
+        cosine,
+        threshold,
+      };
+    }
+
+    return {
+      action: operationAction,
+      operation,
+      confidence,
+      operationConfidenceThreshold: config.operationConfidenceThreshold,
+      sourceFactId,
+      targetFactId,
+      cosine,
+      threshold,
+    };
+  }
+
   if (!hasReplacementSignal(candidate, target)) {
     return { ...baseDecision, reason: 'no_replacement_signal', cosine, threshold };
   }
@@ -146,6 +185,15 @@ function hasReplacementSignal(candidate, target) {
 
 function normalizePredicate(predicate = '') {
   return String(predicate).toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function operationOf(fact) {
+  return String(fact?.operation ?? '').toLowerCase().trim();
+}
+
+function confidenceOf(fact) {
+  const confidence = Number(fact?.confidence);
+  return Number.isFinite(confidence) ? confidence : 0;
 }
 
 function hasEmbedding(embedding) {

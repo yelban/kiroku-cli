@@ -18,6 +18,7 @@ const MIGRATION_FILES = [
   '007_v12_enhancements.sql',
   '008_content_dedup_index.sql',
 ];
+const VEC_MIGRATION_FILES = new Set(['002_vec.sql', '004_scope_vec.sql']);
 
 const dbState = vi.hoisted(() => ({
   db: null,
@@ -77,12 +78,13 @@ async function probeSqliteVec() {
   }
 }
 
-function createTestDb() {
+function createTestDb({ withVec = true } = {}) {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
-  sqliteVecProbe.module.load(db);
+  if (withVec) sqliteVecProbe.module.load(db);
 
   for (const file of MIGRATION_FILES) {
+    if (!withVec && VEC_MIGRATION_FILES.has(file)) continue;
     const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
     const statements = sql
       .split(';')
@@ -95,12 +97,20 @@ function createTestDb() {
   return db;
 }
 
-function addFact({ subject, predicate, object, factType = 'semantic', embedding }) {
+function addFact({
+  subject,
+  predicate,
+  object,
+  factType = 'semantic',
+  confidence = 1,
+  operation,
+  embedding,
+}) {
   const entityMap = storeEntities([{ canonical_name: subject, entity_type: 'concept' }], PROJECT_ID);
-  const fact = { subject, predicate, object, fact_type: factType };
+  const fact = { subject, predicate, object, fact_type: factType, confidence, operation };
   const [factId] = storeFacts([fact], entityMap, PROJECT_ID, null, { licensed: true });
   expect(factId).toBeTruthy();
-  storeEmbeddings([factId], [embedding], PROJECT_ID, [fact]);
+  if (embedding) storeEmbeddings([factId], [embedding], PROJECT_ID, [fact]);
   return factId;
 }
 
@@ -181,6 +191,84 @@ describe.skipIf(!sqliteVecProbe.loaded)('semantic supersede store pass', () => {
     expect(dbState.db.prepare('SELECT status FROM fact_embeddings WHERE fact_id = ?').get(oldId).status).toBe('archived');
   });
 
+  it('delete operation archives same-object semantic targets and audits operation details', () => {
+    const oldId = addFact({
+      subject: 'package.json',
+      predicate: 'depends on',
+      object: 'left-pad',
+      embedding: basis(0),
+    });
+    const newId = addFact({
+      subject: 'package.json',
+      predicate: 'removed dependency',
+      object: 'left-pad',
+      operation: 'delete',
+      confidence: 0.8,
+      embedding: vectorWithCosine(0.84),
+    });
+
+    expect(dbState.db.prepare('SELECT status, decay_bucket FROM facts WHERE id = ?').get(oldId))
+      .toMatchObject({ status: 'archived', decay_bucket: 'archived' });
+    expect(dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(newId).status).toBe('active');
+    expect(dbState.db.prepare('SELECT status FROM fact_embeddings WHERE fact_id = ?').get(oldId).status).toBe('archived');
+
+    const audit = dbState.db.prepare(`
+      SELECT action, target_id, detail_json
+      FROM audit_logs
+      WHERE action = 'memory_operation'
+    `).get();
+    expect(audit).toMatchObject({ action: 'memory_operation', target_id: oldId });
+    const detail = JSON.parse(audit.detail_json);
+    expect(detail).toMatchObject({
+      operation: 'delete',
+      result: 'applied',
+      action: 'archive',
+      confidence: 0.8,
+      sourceFactId: newId,
+      targetFactId: oldId,
+      threshold: 0.58,
+    });
+    expect(detail.cosine).toBeCloseTo(0.84);
+  });
+
+  it('skips low-confidence operation disposal while storing the new fact and audit', () => {
+    const oldId = addFact({
+      subject: 'package.json',
+      predicate: 'depends on',
+      object: 'left-pad',
+      embedding: basis(0),
+    });
+    const newId = addFact({
+      subject: 'package.json',
+      predicate: 'removed dependency',
+      object: 'left-pad',
+      operation: 'delete',
+      confidence: 0.799,
+      embedding: vectorWithCosine(0.84),
+    });
+
+    expect(dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(oldId).status).toBe('active');
+    expect(dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(newId).status).toBe('active');
+    expect(dbState.db.prepare('SELECT status FROM fact_embeddings WHERE fact_id = ?').get(oldId).status).toBe('active');
+
+    const audit = dbState.db.prepare(`
+      SELECT action, target_id, detail_json
+      FROM audit_logs
+      WHERE action = 'memory_operation'
+    `).get();
+    expect(audit).toMatchObject({ action: 'memory_operation', target_id: oldId });
+    const detail = JSON.parse(audit.detail_json);
+    expect(detail).toMatchObject({
+      operation: 'delete',
+      result: 'skipped',
+      reason: 'operation_confidence_below_threshold',
+      confidence: 0.799,
+      sourceFactId: newId,
+      targetFactId: oldId,
+    });
+    expect(detail.cosine).toBeCloseTo(0.84);
+  });
+
   it('keeps complementary same-subject semantic facts active', () => {
     const firstId = addFact({
       subject: 'SyncEngine',
@@ -200,5 +288,52 @@ describe.skipIf(!sqliteVecProbe.loaded)('semantic supersede store pass', () => {
     expect(rows.every(row => row.status === 'active')).toBe(true);
     expect(dbState.db.prepare('SELECT COUNT(*) AS count FROM audit_logs WHERE action = ?').get('semantic_supersede').count)
       .toBe(0);
+  });
+});
+
+describe('operation fallback without embeddings', () => {
+  beforeEach(() => {
+    loggerMock.debug.mockClear();
+    loggerMock.warn.mockClear();
+    loggerMock.info.mockClear();
+    loggerMock.error.mockClear();
+    dbState.db = createTestDb({ withVec: false });
+    dbState.vecEnabled = false;
+    setDb(dbState.db);
+  });
+
+  it('archives exact same-subject object matches when vector embeddings are unavailable', () => {
+    const oldId = addFact({
+      subject: 'package.json',
+      predicate: 'depends on',
+      object: 'left-pad',
+    });
+    const newId = addFact({
+      subject: 'package.json',
+      predicate: 'removed dependency',
+      object: 'left-pad',
+      operation: 'delete',
+      confidence: 0.9,
+    });
+
+    expect(dbState.db.prepare('SELECT status, decay_bucket FROM facts WHERE id = ?').get(oldId))
+      .toMatchObject({ status: 'archived', decay_bucket: 'archived' });
+    expect(dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(newId).status).toBe('active');
+
+    const audit = dbState.db.prepare(`
+      SELECT action, target_id, detail_json
+      FROM audit_logs
+      WHERE action = 'memory_operation'
+    `).get();
+    expect(audit).toMatchObject({ action: 'memory_operation', target_id: oldId });
+    expect(JSON.parse(audit.detail_json)).toMatchObject({
+      operation: 'delete',
+      result: 'applied',
+      action: 'archive',
+      confidence: 0.9,
+      sourceFactId: newId,
+      targetFactId: oldId,
+      cosine: null,
+    });
   });
 });

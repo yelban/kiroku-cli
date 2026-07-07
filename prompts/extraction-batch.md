@@ -56,6 +56,7 @@ Each turn's JSON shape:
       "object": "concise value or description",
       "detail": "optional elaboration (1-2 sentences)",
       "fact_type": "semantic|episodic|preference|task|state",
+      "operation": "add|update|delete",
       "confidence": 0.0-1.0,
       "scope": "project|global"
     }
@@ -100,6 +101,16 @@ Common mistake: marking React, Vue, PostgreSQL, Tailwind as `project`. These are
 - **task**: Action items, decisions, in-flight work, plans.
 - **state**: Current status of something — bugs, blockers, transient conditions.
 
+## Memory Operation
+
+Set `operation` on each fact to express how it changes existing memory:
+
+- **add**: Default. New or complementary knowledge.
+- **update**: A correction or revision that should replace an older fact. Triggers include "改用", "換成", "now uses", "instead uses", "修正為".
+- **delete**: A fact is declared invalid, removed, fixed, resolved, or no longer true. Triggers include "移除", "刪除", "removed", "dropped", "修好", "修復", "fixed", "resolved", "不再", "no longer".
+
+Default to `add` when uncertain. Do NOT mark hypotheticals, questions, proposals, or conditional removals/fixes as `delete`; "if we remove Redis" and "maybe the bug is fixed" are not delete operations. `move` is intentionally out of scope here; emit only add/update/delete.
+
 ## Scope
 
 - **global**: User-level info that applies across all projects — preferences, personal info (email, name, nickname, GitHub handle, timezone), tool habits, universal conventions, language preferences.
@@ -114,6 +125,7 @@ Common mistake: marking React, Vue, PostgreSQL, Tailwind as `project`. These are
 - **Generic programming knowledge**: only extract project-specific or user-specific facts.
 - **Conversation mechanics** and **process narration**: tool actions are not facts to remember.
 - **Hypotheticals**: only extract decisions actually made.
+- **Hypothetical removals/fixes**: do not mark `operation: "delete"` unless the user states the removal, fix, or invalidation actually happened.
 
 ## Confidence Calibration
 
@@ -142,6 +154,7 @@ Most facts do NOT need detail. Skip it unless it adds genuine future value.
 10. The canonical_name `user` is special — it represents the human speaking. Always include it as a `person` entity when a personal fact is emitted.
 11. `fact.subject` MUST exactly match an entity's `canonical_name` in the SAME turn's response. If the subject is new, create the entity first.
 12. Tools, frameworks, languages, databases, services -> `topic`, NEVER `project`. `project` is only for named software products.
+13. Set `operation` to `add`, `update`, or `delete`; omit it only when it is clearly the default `add`.
 
 ## Streaming Discipline
 
@@ -163,15 +176,22 @@ Assistant: 好的。
 User: API 用 Express、DB 用 MySQL。
 Assistant: 收到。
 ===TURN_1_END_INPUT===
+
+===TURN_2===
+User: package.json 已移除 left-pad，不再需要它。
+Assistant: 收到。
+===TURN_2_END_INPUT===
 ```
 
 OUTPUT:
 
 ```
-{"turn_index":0,"entities":[{"canonical_name":"user","entity_type":"person","aliases":[]},{"canonical_name":"bun","entity_type":"topic","aliases":[]},{"canonical_name":"npm","entity_type":"topic","aliases":[]}],"facts":[{"subject":"user","predicate":"prefers package manager","object":"bun over npm","fact_type":"preference","confidence":1.0,"scope":"global"}]}
+{"turn_index":0,"entities":[{"canonical_name":"user","entity_type":"person","aliases":[]},{"canonical_name":"bun","entity_type":"topic","aliases":[]},{"canonical_name":"npm","entity_type":"topic","aliases":[]}],"facts":[{"subject":"user","predicate":"prefers package manager","object":"bun over npm","fact_type":"preference","operation":"update","confidence":1.0,"scope":"global"}]}
 ===TURN_0_END===
-{"turn_index":1,"entities":[{"canonical_name":"Express","entity_type":"topic","aliases":["express.js"]},{"canonical_name":"MySQL","entity_type":"topic","aliases":[]}],"facts":[{"subject":"Express","predicate":"is used as","object":"API framework","fact_type":"semantic","confidence":1.0,"scope":"project"},{"subject":"MySQL","predicate":"is used as","object":"database","fact_type":"semantic","confidence":1.0,"scope":"project"}]}
+{"turn_index":1,"entities":[{"canonical_name":"Express","entity_type":"topic","aliases":["express.js"]},{"canonical_name":"MySQL","entity_type":"topic","aliases":[]}],"facts":[{"subject":"Express","predicate":"is used as","object":"API framework","fact_type":"semantic","operation":"add","confidence":1.0,"scope":"project"},{"subject":"MySQL","predicate":"is used as","object":"database","fact_type":"semantic","operation":"add","confidence":1.0,"scope":"project"}]}
 ===TURN_1_END===
+{"turn_index":2,"entities":[{"canonical_name":"package.json","entity_type":"file","aliases":[]}],"facts":[{"subject":"package.json","predicate":"removed dependency","object":"left-pad","fact_type":"semantic","operation":"delete","confidence":1.0,"scope":"project"}]}
+===TURN_2_END===
 ===BATCH_END===
 ```
 
@@ -184,3 +204,4 @@ OUTPUT:
 - Outputting commentary, preamble, or summary lines outside JSON / delimiter lines.
 - Marking React / Vue / PostgreSQL / Tailwind as `entity_type: project`. These are `topic`.
 - Creating a fact whose `subject` is not in the same turn's `entities` array.
+- Marking hypothetical removals, possible fixes, or questions as `operation: "delete"`.

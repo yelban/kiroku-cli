@@ -7,6 +7,10 @@ import { loadConfig } from '../shared/config.js';
 import { normalizeSupersedeConfig, resolveSemanticSupersedes } from './supersede-resolver.js';
 
 const log = createLogger('store');
+const MEMORY_OPERATION_ACTIONS = Object.freeze({
+  update: 'supersede',
+  delete: 'archive',
+});
 
 function normalizeName(name) {
   return name.toLowerCase().replace(/[-_ ]/g, '');
@@ -122,24 +126,28 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
   for (const fact of facts) {
     const subjectEntityId = entityMap.get(fact.subject) || null;
     const scope = fact.scope || (fact.fact_type === 'preference' ? 'global' : 'project');
+    const operation = normalizeMemoryOperation(fact.operation);
+    const isMemoryOperation = Boolean(MEMORY_OPERATION_ACTIONS[operation]);
 
     // Content-level dedup: skip if identical predicate+object+scope already exists
-    const dupSql = scope === 'global'
-      ? `SELECT id FROM facts WHERE predicate = ? AND object_text = ? AND scope = 'global' AND status = 'active' LIMIT 1`
-      : `SELECT id FROM facts WHERE predicate = ? AND object_text = ? AND scope = ? AND status = 'active' AND project_id = ? LIMIT 1`;
-    const dupParams = scope === 'global'
-      ? [fact.predicate, fact.object]
-      : [fact.predicate, fact.object, scope, projectId];
-    const dup = d.prepare(dupSql).get(...dupParams);
-    if (dup) {
-      d.prepare(`UPDATE facts SET heat = MAX(heat, 0.7), updated_at = ? WHERE id = ?`).run(now, dup.id);
-      log.debug({ dupId: dup.id, predicate: fact.predicate }, 'content dedup: boosted existing fact');
-      results.push(null);
-      continue;
+    if (!isMemoryOperation) {
+      const dupSql = scope === 'global'
+        ? `SELECT id FROM facts WHERE predicate = ? AND object_text = ? AND scope = 'global' AND status = 'active' LIMIT 1`
+        : `SELECT id FROM facts WHERE predicate = ? AND object_text = ? AND scope = ? AND status = 'active' AND project_id = ? LIMIT 1`;
+      const dupParams = scope === 'global'
+        ? [fact.predicate, fact.object]
+        : [fact.predicate, fact.object, scope, projectId];
+      const dup = d.prepare(dupSql).get(...dupParams);
+      if (dup) {
+        d.prepare(`UPDATE facts SET heat = MAX(heat, 0.7), updated_at = ? WHERE id = ?`).run(now, dup.id);
+        log.debug({ dupId: dup.id, predicate: fact.predicate }, 'content dedup: boosted existing fact');
+        results.push(null);
+        continue;
+      }
     }
 
     // Check for existing active fact with same subject+predicate+scope → supersede
-    if (subjectEntityId) {
+    if (subjectEntityId && !isMemoryOperation) {
       const existing = d.prepare(
         `SELECT id FROM facts WHERE project_id = ? AND subject_entity_id = ? AND predicate = ? AND scope = ? AND status = 'active'`
       ).get(projectId, subjectEntityId, fact.predicate, scope);
@@ -161,6 +169,22 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
         0.7, now, 0);
 
     writeAudit(d, { projectId, action: 'extract', targetType: 'fact', targetId: fid, detail: { subject: fact.subject, predicate: fact.predicate } });
+    if (isMemoryOperation && !isVecEnabled()) {
+      runExactOperationPass(d, {
+        projectId,
+        sourceFact: {
+          id: fid,
+          subjectEntityId,
+          predicate: fact.predicate,
+          objectText: fact.object,
+          scope,
+          operation,
+          confidence: fact.confidence || 0.5,
+        },
+        config: getSupersedeConfig(),
+        now,
+      });
+    }
     results.push(fid);
   }
 
@@ -183,6 +207,7 @@ export function storeEmbeddings(factIds, embeddings, projectId, facts, supersede
 
   for (let i = 0; i < factIds.length; i++) {
     if (i >= embeddings.length) break;
+    if (!factIds[i]) continue;
     const fact = facts[i] || {};
     const scope = fact.scope || (fact.fact_type === 'preference' ? 'global' : 'project');
     const embedding = new Float32Array(embeddings[i]);
@@ -194,7 +219,12 @@ export function storeEmbeddings(factIds, embeddings, projectId, facts, supersede
       'active',
       Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength),
     );
-    inserted.push({ factId: factIds[i], embedding });
+    inserted.push({
+      factId: factIds[i],
+      embedding,
+      operation: normalizeMemoryOperation(fact.operation),
+      confidence: fact.confidence,
+    });
   }
 
   runSemanticSupersedePass(d, inserted, projectId, supersedeConfig);
@@ -217,7 +247,8 @@ function runSemanticSupersedePass(d, insertedFacts, projectId, supersedeConfig) 
         f.predicate,
         f.object_text AS objectText,
         f.fact_type AS factType,
-        f.scope
+        f.scope,
+        f.confidence
       FROM facts f
       JOIN fact_embeddings fe ON fe.fact_id = f.id
       WHERE f.id = ? AND f.status = 'active' AND fe.status = 'active'
@@ -236,36 +267,43 @@ function runSemanticSupersedePass(d, insertedFacts, projectId, supersedeConfig) 
       embedding: embeddingFromDb(row.embedding),
     }));
     const decisions = resolveSemanticSupersedes(
-      { ...candidate, embedding: inserted.embedding },
+      {
+        ...candidate,
+        embedding: inserted.embedding,
+        operation: inserted.operation,
+        confidence: candidate.confidence,
+      },
       activeFacts,
       config,
     );
 
     for (const decision of decisions) {
+      if (decision.action === 'skip' && decision.operation) {
+        writeOperationAudit(d, { projectId, decision, result: 'skipped' });
+        continue;
+      }
       if (decision.action !== 'supersede' && decision.action !== 'archive') continue;
 
       const status = decision.action === 'archive' ? 'archived' : 'superseded';
-      if (status === 'archived') {
-        d.prepare(`UPDATE facts SET status = ?, decay_bucket = 'archived', updated_at = ? WHERE id = ? AND status = 'active'`)
-          .run(status, now, decision.targetFactId);
-      } else {
-        d.prepare(`UPDATE facts SET status = ?, updated_at = ? WHERE id = ? AND status = 'active'`)
-          .run(status, now, decision.targetFactId);
-      }
+      applyFactStatus(d, decision.targetFactId, status, now);
       d.prepare(`UPDATE fact_embeddings SET status = ? WHERE fact_id = ?`).run(status, decision.targetFactId);
-      writeAudit(d, {
-        projectId,
-        action: 'semantic_supersede',
-        targetType: 'fact',
-        targetId: decision.targetFactId,
-        detail: {
-          action: decision.action,
-          sourceFactId: decision.sourceFactId,
-          targetFactId: decision.targetFactId,
-          cosine: roundCosine(decision.cosine),
-          threshold: decision.threshold,
-        },
-      });
+      if (decision.operation) {
+        writeOperationAudit(d, { projectId, decision, result: 'applied' });
+      } else {
+        writeAudit(d, {
+          projectId,
+          action: 'semantic_supersede',
+          targetType: 'fact',
+          targetId: decision.targetFactId,
+          detail: {
+            action: decision.action,
+            sourceFactId: decision.sourceFactId,
+            targetFactId: decision.targetFactId,
+            cosine: roundCosine(decision.cosine),
+            threshold: decision.threshold,
+          },
+        });
+      }
     }
   }
 }
@@ -305,6 +343,126 @@ function selectSemanticSupersedeTargets(d, { projectId, scope, subjectEntityId, 
   `).all(...params);
 }
 
+function runExactOperationPass(d, { projectId, sourceFact, config, now }) {
+  const target = selectExactOperationTarget(d, { projectId, sourceFact });
+  const decision = resolveExactOperation(sourceFact, target, config);
+
+  if (decision.action === 'skip') {
+    writeOperationAudit(d, { projectId, decision, result: 'skipped' });
+    return;
+  }
+
+  const status = decision.action === 'archive' ? 'archived' : 'superseded';
+  applyFactStatus(d, decision.targetFactId, status, now);
+  writeOperationAudit(d, { projectId, decision, result: 'applied' });
+}
+
+function selectExactOperationTarget(d, { projectId, sourceFact }) {
+  if (!sourceFact.subjectEntityId) return null;
+
+  const scopeClause = sourceFact.scope === 'global'
+    ? `f.scope = 'global'`
+    : `f.project_id = ? AND f.scope = ?`;
+  const params = sourceFact.scope === 'global'
+    ? [
+        sourceFact.subjectEntityId,
+        sourceFact.id,
+        sourceFact.objectText,
+        sourceFact.predicate,
+        sourceFact.objectText,
+        sourceFact.predicate,
+        sourceFact.objectText,
+      ]
+    : [
+        projectId,
+        sourceFact.scope,
+        sourceFact.subjectEntityId,
+        sourceFact.id,
+        sourceFact.objectText,
+        sourceFact.predicate,
+        sourceFact.objectText,
+        sourceFact.predicate,
+        sourceFact.objectText,
+      ];
+
+  return d.prepare(`
+    SELECT
+      f.id,
+      f.subject_entity_id AS subjectEntityId,
+      f.predicate,
+      f.object_text AS objectText,
+      f.fact_type AS factType
+    FROM facts f
+    WHERE ${scopeClause}
+      AND f.subject_entity_id = ?
+      AND f.id != ?
+      AND f.status = 'active'
+      AND (f.object_text = ? OR f.predicate = ?)
+    ORDER BY
+      CASE
+        WHEN f.object_text = ? AND f.predicate = ? THEN 0
+        WHEN f.object_text = ? THEN 1
+        ELSE 2
+      END,
+      f.updated_at DESC
+    LIMIT 1
+  `).get(...params);
+}
+
+function resolveExactOperation(sourceFact, target, config) {
+  const operation = normalizeMemoryOperation(sourceFact.operation);
+  const action = MEMORY_OPERATION_ACTIONS[operation];
+  const confidence = confidenceOf(sourceFact);
+  const baseDecision = {
+    action: 'skip',
+    operation,
+    confidence,
+    operationConfidenceThreshold: config.operationConfidenceThreshold,
+    sourceFactId: sourceFact.id,
+    targetFactId: target?.id ?? null,
+    cosine: null,
+    threshold: null,
+  };
+
+  if (!action) return { ...baseDecision, reason: 'unsupported_operation' };
+  if (!target) return { ...baseDecision, reason: 'no_exact_target' };
+  if (confidence < config.operationConfidenceThreshold) {
+    return { ...baseDecision, reason: 'operation_confidence_below_threshold' };
+  }
+  return { ...baseDecision, action };
+}
+
+function applyFactStatus(d, factId, status, now) {
+  if (status === 'archived') {
+    d.prepare(`UPDATE facts SET status = ?, decay_bucket = 'archived', updated_at = ? WHERE id = ? AND status = 'active'`)
+      .run(status, now, factId);
+  } else {
+    d.prepare(`UPDATE facts SET status = ?, updated_at = ? WHERE id = ? AND status = 'active'`)
+      .run(status, now, factId);
+  }
+}
+
+function writeOperationAudit(d, { projectId, decision, result }) {
+  writeAudit(d, {
+    projectId,
+    action: 'memory_operation',
+    targetType: 'fact',
+    targetId: decision.targetFactId,
+    detail: {
+      operation: decision.operation,
+      result,
+      reason: decision.reason,
+      action: decision.action,
+      confidence: decision.confidence,
+      operationConfidenceThreshold: decision.operationConfidenceThreshold,
+      sourceFactId: decision.sourceFactId,
+      targetFactId: decision.targetFactId,
+      cosine: roundCosine(decision.cosine),
+      threshold: decision.threshold,
+    },
+  });
+}
+
 function embeddingFromDb(value) {
   if (!value) return null;
   if (Array.isArray(value) || value instanceof Float32Array) return value;
@@ -316,7 +474,17 @@ function embeddingFromDb(value) {
 }
 
 function roundCosine(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   return Number(value.toFixed(6));
+}
+
+function normalizeMemoryOperation(operation) {
+  return String(operation ?? 'add').toLowerCase().trim() || 'add';
+}
+
+function confidenceOf(fact) {
+  const confidence = Number(fact?.confidence);
+  return Number.isFinite(confidence) ? confidence : 0;
 }
 
 export function createExtractionJob(jid, queueFile, eventId) {

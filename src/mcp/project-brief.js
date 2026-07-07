@@ -32,6 +32,10 @@ function formatLine(r) {
 }
 
 export function getProjectBrief(db, projectId, config) {
+  return renderProjectBriefRows(selectProjectBriefRows(db, projectId, config));
+}
+
+export function selectProjectBriefRows(db, projectId, config) {
   // Accept both old (maxFacts number) and new (config object) signatures
   let maxFacts, maxTokens;
   if (typeof config === 'number') {
@@ -45,8 +49,9 @@ export function getProjectBrief(db, projectId, config) {
   // Fetch 3× candidates for diversity filtering
   const fetchLimit = maxFacts * 3;
   const candidates = db.prepare(`
-    SELECT f.fact_type, f.predicate, f.object_text, f.heat, f.scope,
-           f.object_detail, e.canonical_name as subject
+    SELECT f.id as fact_id, f.project_id, f.fact_type, f.predicate, f.object_text,
+           f.object_detail, f.confidence, f.heat, f.scope, f.created_at,
+           f.access_count, e.canonical_name as subject
     FROM facts f
     LEFT JOIN entities e ON f.subject_entity_id = e.id
     WHERE f.status = 'active'
@@ -64,7 +69,7 @@ export function getProjectBrief(db, projectId, config) {
     LIMIT ?
   `).all(projectId, fetchLimit);
 
-  if (!candidates.length) return 'No project context available yet.';
+  if (!candidates.length) return [];
 
   const selected = [];
   let tokenCount = 0;
@@ -83,10 +88,13 @@ export function getProjectBrief(db, projectId, config) {
     if (selected.length >= maxFacts) break;
   }
 
-  if (!selected.length) return 'No project context available yet.';
+  return selected;
+}
 
-  const lines = selected.map(formatLine);
-  return `# Project Memory Brief (${selected.length} facts)\n\n${lines.join('\n')}`;
+export function renderProjectBriefRows(rows) {
+  if (!rows.length) return 'No project context available yet.';
+  const lines = rows.map(formatLine);
+  return `# Project Memory Brief (${rows.length} facts)\n\n${lines.join('\n')}`;
 }
 
 // Exported for reuse in memory-search.js

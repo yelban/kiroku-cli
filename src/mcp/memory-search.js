@@ -13,24 +13,34 @@ function ensureStoreDb() {
 }
 
 export async function memorySearch(params) {
+  const rows = await selectMemorySearchRows(params);
+  boostSearchRows(rows);
+  return renderMemorySearchRows(rows);
+}
+
+export async function selectMemorySearchRows(params) {
   const db = getDb();
-  const { query, project_id, top_k = 10, fact_types, time_from, time_to, status = 'active', scope = 'all' } = params;
-  const limit = Math.min(top_k, 50);
+  const searchParams = normalizeSearchParams(params);
 
   if (isVecEnabled()) {
     try {
-      const result = await vectorSearch(db, { query, project_id, limit, fact_types, time_from, time_to, status, scope });
-      if (result !== 'No matching facts found.') return result;
+      const rows = await vectorSearchRows(db, searchParams);
+      if (rows.length > 0) return rows;
       log.debug('vector search returned empty, falling back to text');
     } catch (err) {
       log.warn({ err: err.message, stack: err.stack }, 'vector search failed, falling back to text');
     }
   }
 
-  return textSearch(db, { query, project_id, limit, fact_types, time_from, time_to, status, scope });
+  return textSearchRows(db, searchParams);
 }
 
-async function vectorSearch(db, params) {
+function normalizeSearchParams(params) {
+  const { query, project_id, top_k = 10, fact_types, time_from, time_to, status = 'active', scope = 'all' } = params;
+  return { query, project_id, limit: Math.min(top_k, 50), fact_types, time_from, time_to, status, scope };
+}
+
+async function vectorSearchRows(db, params) {
   const { query, project_id, limit, fact_types, time_from, time_to, status, scope } = params;
   const { initEmbedder, embedTexts } = await import('../worker/embedder.js');
   const { loadConfig } = await import('../shared/config.js');
@@ -44,7 +54,7 @@ async function vectorSearch(db, params) {
 
   if (scope === 'project' || scope === 'all') {
     queries.push(db.prepare(`
-      SELECT fe.fact_id, fe.distance, f.predicate, f.object_text, f.object_detail, f.fact_type, f.confidence, f.scope, f.created_at, e.canonical_name as subject
+      SELECT fe.fact_id, fe.distance, f.project_id, f.predicate, f.object_text, f.object_detail, f.fact_type, f.confidence, f.scope, f.created_at, f.heat, f.access_count, e.canonical_name as subject
       FROM (
         SELECT fact_id, distance FROM fact_embeddings
         WHERE project_id = ? AND scope = 'project' AND status = ? AND embedding MATCH ? AND k = ?
@@ -56,7 +66,7 @@ async function vectorSearch(db, params) {
 
   if (scope === 'global' || scope === 'all') {
     queries.push(db.prepare(`
-      SELECT fe.fact_id, fe.distance, f.predicate, f.object_text, f.object_detail, f.fact_type, f.confidence, f.scope, f.created_at, e.canonical_name as subject
+      SELECT fe.fact_id, fe.distance, f.project_id, f.predicate, f.object_text, f.object_detail, f.fact_type, f.confidence, f.scope, f.created_at, f.heat, f.access_count, e.canonical_name as subject
       FROM (
         SELECT fact_id, distance FROM fact_embeddings
         WHERE scope = 'global' AND status = ? AND embedding MATCH ? AND k = ?
@@ -86,20 +96,13 @@ async function vectorSearch(db, params) {
 
   rows = diversityFilter(rows, limit);
 
-  if (rows.length > 0) {
-    try {
-      ensureStoreDb();
-      boostFactHeat(rows.map(r => r.fact_id));
-    } catch (err) { log.debug({ err: err.message }, 'boost failed'); }
-  }
-
-  return formatResults(rows);
+  return rows;
 }
 
-function textSearch(db, params) {
+function textSearchRows(db, params) {
   const { query, project_id, limit, fact_types, time_from, time_to, status, scope } = params;
 
-  let sql = `SELECT f.id as fact_id, f.predicate, f.object_text, f.object_detail, f.fact_type, f.confidence, f.scope, f.created_at, e.canonical_name as subject
+  let sql = `SELECT f.id as fact_id, f.project_id, f.predicate, f.object_text, f.object_detail, f.fact_type, f.confidence, f.scope, f.created_at, f.heat, f.access_count, e.canonical_name as subject
     FROM facts f LEFT JOIN entities e ON f.subject_entity_id = e.id
     WHERE f.status = ?`;
   const p = [status];
@@ -140,14 +143,7 @@ function textSearch(db, params) {
 
   let results = db.prepare(sql).all(...p);
   results = diversityFilter(results, limit);
-  if (results.length > 0) {
-    try {
-      ensureStoreDb();
-      boostFactHeat(results.map(r => r.fact_id));
-    } catch (err) { log.debug({ err: err.message }, 'boost failed'); }
-  }
-
-  return formatResults(results);
+  return results;
 }
 
 function diversityFilter(rows, limit) {
@@ -160,7 +156,15 @@ function diversityFilter(rows, limit) {
   return selected;
 }
 
-function formatResults(rows) {
+function boostSearchRows(rows) {
+  if (rows.length === 0) return;
+  try {
+    ensureStoreDb();
+    boostFactHeat(rows.map(r => r.fact_id));
+  } catch (err) { log.debug({ err: err.message }, 'boost failed'); }
+}
+
+export function renderMemorySearchRows(rows) {
   if (rows.length === 0) return 'No matching facts found.';
   let md = `| Subject | Predicate | Object | Type | Scope | Conf | Date |\n|---|---|---|---|---|---|---|\n`;
   for (const r of rows) {

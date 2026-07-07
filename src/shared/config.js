@@ -125,6 +125,14 @@ const ConfigSchema = z.object({
       maxFacts: z.number().default(50),
       maxTokens: z.number().default(4000), // 0 = unlimited
     }).default({}),
+    search: z.object({
+      ranking: z.object({
+        simWeight: z.number().default(0.65),
+        heatWeight: z.number().default(0.15),
+        recencyWeight: z.number().default(0.20),
+        halfLifeDays: z.number().default(30),
+      }).default({}),
+    }).default({}),
   }).default({}),
   license: z.object({
     enabled: z.boolean().default(true),

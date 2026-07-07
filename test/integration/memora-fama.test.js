@@ -82,9 +82,9 @@ const scoreState = {
   questions: [],
 };
 
-// Measured M1-2 baseline. Update only when a memory-behavior change
-// intentionally changes the mini-FAMA score and the new baseline is reviewed.
-const BASELINE_FAMA_FLOOR = 0.673797;
+// Measured M1-3 mixed-ranking baseline: 0.673797 -> 0.764706.
+// Update only when a memory-behavior change intentionally changes the mini-FAMA score and the new baseline is reviewed.
+const BASELINE_FAMA_FLOOR = 0.764706;
 
 function createMemoraDb() {
   const db = new Database(':memory:');
@@ -543,11 +543,11 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     });
   });
 
-  test.fails('08 newer fact ranks ahead despite slightly lower vector similarity', async () => {
+  test('08 newer fact ranks ahead despite slightly lower vector similarity', async () => {
     await evaluateQuestion({
       id: '08',
       title: 'newer-vs-older ranking',
-      expected: 'test.fails',
+      expected: 'pass',
     }, async ({ criterion }) => {
       const query = 'ranking arbitration';
       const queryVector = basis(8);

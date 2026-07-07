@@ -1,9 +1,18 @@
 import { getDb, isVecEnabled } from '../shared/db.js';
+import { loadConfig } from '../shared/config.js';
 import { createLogger } from '../shared/logger.js';
 import { boostFactHeat, setDb as storeSetDb } from '../worker/store.js';
 import { isDiverse } from './project-brief.js';
 
 const log = createLogger('memory-search');
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const TEXT_SEARCH_SIMILARITY = 1;
+const DEFAULT_SEARCH_RANKING = Object.freeze({
+  simWeight: 0.65,
+  heatWeight: 0.15,
+  recencyWeight: 0.20,
+  halfLifeDays: 30,
+});
 
 let _storeInitialized = false;
 function ensureStoreDb() {
@@ -43,11 +52,12 @@ function normalizeSearchParams(params) {
 async function vectorSearchRows(db, params) {
   const { query, project_id, limit, fact_types, time_from, time_to, status, scope } = params;
   const { initEmbedder, embedTexts } = await import('../worker/embedder.js');
-  const { loadConfig } = await import('../shared/config.js');
-  await initEmbedder(loadConfig().worker.embedding);
+  const config = loadConfig();
+  await initEmbedder(config.worker.embedding);
   const embeddings = await embedTexts([query]);
   const queryEmbedding = new Float32Array(embeddings[0]);
   const embBuf = Buffer.from(queryEmbedding.buffer);
+  const candidateLimit = limit * 3;
 
   // vec0 doesn't support OR conditions — run separate queries per scope, then merge
   const queries = [];
@@ -61,7 +71,7 @@ async function vectorSearchRows(db, params) {
       ) fe
       JOIN facts f ON f.id = fe.fact_id
       LEFT JOIN entities e ON f.subject_entity_id = e.id
-    `).all(project_id, status, embBuf, limit));
+    `).all(project_id, status, embBuf, candidateLimit));
   }
 
   if (scope === 'global' || scope === 'all') {
@@ -73,7 +83,7 @@ async function vectorSearchRows(db, params) {
       ) fe
       JOIN facts f ON f.id = fe.fact_id
       LEFT JOIN entities e ON f.subject_entity_id = e.id
-    `).all(status, embBuf, limit));
+    `).all(status, embBuf, candidateLimit));
   }
 
   // Merge, deduplicate by fact_id, sort by distance, take top limit
@@ -88,12 +98,13 @@ async function vectorSearchRows(db, params) {
     }
   }
   rows.sort((a, b) => a.distance - b.distance);
-  rows = rows.slice(0, limit * 3); // over-fetch for diversity filtering
+  rows = rows.slice(0, candidateLimit); // over-fetch for diversity filtering
 
   if (fact_types?.length) rows = rows.filter(r => fact_types.includes(r.fact_type));
   if (time_from) rows = rows.filter(r => r.created_at >= time_from);
   if (time_to) rows = rows.filter(r => r.created_at <= time_to);
 
+  rows = rankSearchRows(rows, getSearchRankingConfig(config));
   rows = diversityFilter(rows, limit);
 
   return rows;
@@ -142,8 +153,76 @@ function textSearchRows(db, params) {
   p.push(limit * 3); // over-fetch for diversity filtering
 
   let results = db.prepare(sql).all(...p);
+  results = rankSearchRows(results, getSearchRankingConfig());
   results = diversityFilter(results, limit);
   return results;
+}
+
+function getSearchRankingConfig(config = loadConfig()) {
+  const ranking = config?.mcp?.search?.ranking ?? {};
+  return {
+    simWeight: finiteNumberOrDefault(ranking.simWeight, DEFAULT_SEARCH_RANKING.simWeight),
+    heatWeight: finiteNumberOrDefault(ranking.heatWeight, DEFAULT_SEARCH_RANKING.heatWeight),
+    recencyWeight: finiteNumberOrDefault(ranking.recencyWeight, DEFAULT_SEARCH_RANKING.recencyWeight),
+    halfLifeDays: positiveNumberOrDefault(ranking.halfLifeDays, DEFAULT_SEARCH_RANKING.halfLifeDays),
+  };
+}
+
+function rankSearchRows(rows, ranking) {
+  if (rows.length < 2) return rows;
+  const nowMs = Date.now();
+  return rows
+    .map((row, index) => ({
+      row,
+      index,
+      score: scoreSearchRow(row, ranking, nowMs),
+    }))
+    .sort((a, b) => (b.score - a.score) || (a.index - b.index))
+    .map(item => item.row);
+}
+
+function scoreSearchRow(row, ranking, nowMs) {
+  const sim = typeof row.distance === 'number'
+    ? similarityFromDistance(row.distance)
+    : TEXT_SEARCH_SIMILARITY;
+  const heat = clamp01(row.heat);
+  const recency = recencyFromCreatedAt(row.created_at, ranking.halfLifeDays, nowMs);
+
+  return (
+    ranking.simWeight * sim +
+    ranking.heatWeight * heat +
+    ranking.recencyWeight * recency
+  );
+}
+
+function similarityFromDistance(distance) {
+  const value = Number(distance);
+  if (!Number.isFinite(value)) return 0;
+  return 1 / (1 + Math.max(0, value));
+}
+
+function recencyFromCreatedAt(createdAt, halfLifeDays, nowMs) {
+  // Recency must use created_at; decay sweeps rewrite updated_at every 6h.
+  const createdMs = Date.parse(createdAt);
+  if (!Number.isFinite(createdMs)) return 0;
+  const ageDays = Math.max(0, (nowMs - createdMs) / MS_PER_DAY);
+  return Math.pow(0.5, ageDays / halfLifeDays);
+}
+
+function finiteNumberOrDefault(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function positiveNumberOrDefault(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function clamp01(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.min(1, number));
 }
 
 function diversityFilter(rows, limit) {

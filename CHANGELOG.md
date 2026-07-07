@@ -3,6 +3,16 @@
 All notable changes to Kiroku are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+#### Memory Search Ranking
+- `memory_search` now reranks over-fetched candidates with `score = w_sim * sim + w_heat * heat + w_rec * recency`, where `recency = 0.5^(age_days / halfLifeDays)` and age is computed from `created_at`.
+- Default ranking weights are `simWeight=0.65`, `heatWeight=0.15`, `recencyWeight=0.20`, and `halfLifeDays=30`, so newer hot facts can outrank older facts with only slightly better vector similarity.
+- Vector search derives `sim` monotonically from sqlite-vec distance; text search uses a constant `sim` and applies the same heat/recency scoring before diversity filtering.
+- Set `mcp.search.ranking` to `(simWeight=1, heatWeight=0, recencyWeight=0)` to restore pure similarity ordering. `confidence` is intentionally not part of the ranking formula.
+
 ## [1.6.0] - 2026-04-29
 
 ### Changed — Dynamic Upstream now keyed by bearer token

@@ -17,6 +17,7 @@ const MIGRATION_FILES = [
   '007_v12_enhancements.sql',
   '008_content_dedup_index.sql',
   '009_repo_grounding.sql',
+  '010_valid_from_backfill.sql',
 ];
 
 const dbState = vi.hoisted(() => ({ db: null }));
@@ -55,7 +56,7 @@ function addFact({ subject, predicate, object, factType = 'semantic', scope = 'p
 }
 
 function factRow(id) {
-  return dbState.db.prepare('SELECT status, decay_bucket FROM facts WHERE id = ?').get(id);
+  return dbState.db.prepare('SELECT status, decay_bucket, valid_from, valid_to, supersedes_fact_id FROM facts WHERE id = ?').get(id);
 }
 
 function exactAudits() {
@@ -74,8 +75,14 @@ describe('exact supersede gate (G13)', () => {
     const oldId = addFact({ subject: 'User', predicate: 'prefers editor', object: 'vim', factType: 'preference', scope: 'global' });
     const newId = addFact({ subject: 'User', predicate: 'prefers editor', object: 'helix', factType: 'preference', scope: 'global' });
 
-    expect(factRow(oldId).status).toBe('superseded');
-    expect(factRow(newId).status).toBe('active');
+    const old = factRow(oldId);
+    const fresh = factRow(newId);
+    expect(old.status).toBe('superseded');
+    expect(old.valid_to).not.toBeNull();
+    expect(fresh.status).toBe('active');
+    expect(fresh.valid_from).not.toBeNull();
+    expect(fresh.valid_to).toBeNull();
+    expect(fresh.supersedes_fact_id).toBe(oldId);
 
     const audits = exactAudits();
     expect(audits).toHaveLength(1);
@@ -85,11 +92,13 @@ describe('exact supersede gate (G13)', () => {
 
   it('state: same subject+predicate archives the old value (type-aware disposition)', () => {
     const oldId = addFact({ subject: 'LoginFlow', predicate: 'currently blocked by', object: 'expired cert', factType: 'state' });
-    addFact({ subject: 'LoginFlow', predicate: 'currently blocked by', object: 'missing env', factType: 'state' });
+    const newId = addFact({ subject: 'LoginFlow', predicate: 'currently blocked by', object: 'missing env', factType: 'state' });
 
     const old = factRow(oldId);
     expect(old.status).toBe('archived');
     expect(old.decay_bucket).toBe('archived');
+    expect(old.valid_to).not.toBeNull();
+    expect(factRow(newId).supersedes_fact_id).toBe(oldId);
     expect(exactAudits()[0].detail.action).toBe('archived');
   });
 
@@ -98,7 +107,12 @@ describe('exact supersede gate (G13)', () => {
       subject: 'DeployPipeline', predicate: 'requires env var', object: `${name} set`,
     }));
 
-    for (const id of ids) expect(factRow(id).status).toBe('active');
+    for (const id of ids) {
+      const row = factRow(id);
+      expect(row.status).toBe('active');
+      expect(row.supersedes_fact_id).toBeNull();
+      expect(row.valid_to).toBeNull();
+    }
     expect(exactAudits()).toHaveLength(0);
   });
 

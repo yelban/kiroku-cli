@@ -171,10 +171,10 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
     }
 
     const fid = factId();
-    d.prepare(`INSERT INTO facts (id, project_id, subject_entity_id, predicate, object_text, object_detail, fact_type, confidence, heat, decay_bucket, source_turn_id, scope, status, base_heat, last_accessed_at, access_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    d.prepare(`INSERT INTO facts (id, project_id, subject_entity_id, predicate, object_text, object_detail, fact_type, confidence, heat, decay_bucket, source_turn_id, scope, status, base_heat, last_accessed_at, access_count, valid_from, supersedes_fact_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(fid, projectId, subjectEntityId, fact.predicate, fact.object, fact.detail || null,
         fact.fact_type || 'semantic', fact.confidence || 0.5, 0.7, 'hot', sourceTurnId, scope, 'active',
-        0.7, now, 0);
+        0.7, now, 0, now, exactSupersede?.targetId ?? null);
 
     writeAudit(d, { projectId, action: 'extract', targetType: 'fact', targetId: fid, detail: { subject: fact.subject, predicate: fact.predicate } });
     if (exactSupersede) {
@@ -343,6 +343,9 @@ function runSemanticSupersedePass(d, insertedFacts, projectId, supersedeConfig) 
       const status = decision.action === 'archive' ? 'archived' : 'superseded';
       applyFactStatus(d, decision.targetFactId, status, now);
       d.prepare(`UPDATE fact_embeddings SET status = ? WHERE fact_id = ?`).run(status, decision.targetFactId);
+      if (decision.operation !== 'delete') {
+        linkSupersededFact(d, decision.sourceFactId, decision.targetFactId);
+      }
       if (decision.operation) {
         writeOperationAudit(d, { projectId, decision, result: 'applied' });
       } else {
@@ -410,6 +413,9 @@ function runExactOperationPass(d, { projectId, sourceFact, config, now }) {
 
   const status = decision.action === 'archive' ? 'archived' : 'superseded';
   applyFactStatus(d, decision.targetFactId, status, now);
+  if (decision.action === 'supersede') {
+    linkSupersededFact(d, decision.sourceFactId, decision.targetFactId);
+  }
   writeOperationAudit(d, { projectId, decision, result: 'applied' });
 }
 
@@ -601,14 +607,27 @@ function resolveExactOperation(sourceFact, target, config) {
   return { ...baseDecision, action };
 }
 
+// Every exit from 'active' funnels through here: valid_to marks when the
+// fact stopped being current belief, whatever the reason — the reason itself
+// is carried by status.
 function applyFactStatus(d, factId, status, now) {
-  if (status === 'archived') {
-    d.prepare(`UPDATE facts SET status = ?, decay_bucket = 'archived', updated_at = ? WHERE id = ? AND status = 'active'`)
-      .run(status, now, factId);
+  if (status === 'archived' || status === 'evicted') {
+    d.prepare(`UPDATE facts SET status = ?, decay_bucket = ?, valid_to = ?, updated_at = ? WHERE id = ? AND status = 'active'`)
+      .run(status, status, now, now, factId);
   } else {
-    d.prepare(`UPDATE facts SET status = ?, updated_at = ? WHERE id = ? AND status = 'active'`)
-      .run(status, now, factId);
+    d.prepare(`UPDATE facts SET status = ?, valid_to = ?, updated_at = ? WHERE id = ? AND status = 'active'`)
+      .run(status, now, now, factId);
   }
+}
+
+// supersedes_fact_id is only written for genuine one-to-one replacements
+// (exact, semantic, operation update, manual re-save): a chain link means
+// "this fact replaced that one". Keeps the first predecessor when several
+// decisions fire for one new fact.
+function linkSupersededFact(d, newFactId, oldFactId) {
+  if (!newFactId || !oldFactId) return;
+  d.prepare('UPDATE facts SET supersedes_fact_id = ? WHERE id = ? AND supersedes_fact_id IS NULL')
+    .run(oldFactId, newFactId);
 }
 
 function writeOperationAudit(d, { projectId, decision, result }) {
@@ -750,19 +769,15 @@ export function saveFactManually({ subject, predicate, object, detail, factType,
     `SELECT id FROM facts WHERE project_id = ? AND subject_entity_id = ? AND predicate = ? AND scope = ? AND status = 'active'`
   ).get(projectId, subjectEntityId, predicate, resolvedScope);
   if (existingFact) {
-    d.prepare(`UPDATE facts SET status = 'superseded', updated_at = ? WHERE id = ?`).run(now, existingFact.id);
-    if (isVecEnabled()) {
-      try {
-        d.prepare(`UPDATE fact_embeddings SET status = 'superseded' WHERE fact_id = ?`).run(existingFact.id);
-      } catch { /* embedding may not exist yet */ }
-    }
+    applyFactStatus(d, existingFact.id, 'superseded', now);
+    syncFactEmbeddingStatus(d, existingFact.id, 'superseded');
   }
 
   // Insert new fact
   const fid = factId();
-  d.prepare(`INSERT INTO facts (id, project_id, subject_entity_id, predicate, object_text, object_detail, fact_type, confidence, heat, decay_bucket, source_turn_id, scope, status, base_heat, last_accessed_at, access_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+  d.prepare(`INSERT INTO facts (id, project_id, subject_entity_id, predicate, object_text, object_detail, fact_type, confidence, heat, decay_bucket, source_turn_id, scope, status, base_heat, last_accessed_at, access_count, valid_from, supersedes_fact_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(fid, projectId, subjectEntityId, predicate, object, detail || null, factType || 'semantic', 1.0, 1.0, 'hot', null, resolvedScope, 'active',
-      1.0, now, 0);
+      1.0, now, 0, now, existingFact?.id ?? null);
 
   return fid;
 }
@@ -775,7 +790,7 @@ export function archiveFacts({ factId: fid, subject, predicate, projectId }) {
   const archived = [];
 
   if (fid) {
-    d.prepare(`UPDATE facts SET status = 'archived', decay_bucket = 'archived', updated_at = ? WHERE id = ?`).run(now, fid);
+    applyFactStatus(d, fid, 'archived', now);
     archived.push(fid);
   } else if (subject || predicate) {
     // Search both project-scoped and global facts
@@ -786,7 +801,7 @@ export function archiveFacts({ factId: fid, subject, predicate, projectId }) {
 
     const rows = d.prepare(sql).all(...params);
     for (const row of rows) {
-      d.prepare(`UPDATE facts SET status = 'archived', decay_bucket = 'archived', updated_at = ? WHERE id = ?`).run(now, row.id);
+      applyFactStatus(d, row.id, 'archived', now);
       archived.push(row.id);
     }
   }
@@ -818,7 +833,7 @@ function evictIfOverLimit(d, factLimit, incoming, now) {
   ).all(overflow);
 
   for (const v of victims) {
-    d.prepare(`UPDATE facts SET status = 'evicted', decay_bucket = 'evicted', updated_at = ? WHERE id = ?`).run(now, v.id);
+    applyFactStatus(d, v.id, 'evicted', now);
     writeAudit(d, { projectId: 'system', action: 'evict', targetType: 'fact', targetId: v.id });
     if (isVecEnabled()) {
       try { d.prepare(`DELETE FROM fact_embeddings WHERE fact_id = ?`).run(v.id); } catch { /* ok */ }
@@ -1061,8 +1076,7 @@ export async function runCompactionSweep(db, opts = {}, decayConfig = {}) {
 
         if (cosine > 0.92 && !conflictPattern) {
           // Archive lower-heat fact, boost survivor
-          db.prepare(`UPDATE facts SET status = 'compacted', updated_at = ? WHERE id = ?`)
-            .run(now, facts[j].id);
+          applyFactStatus(db, facts[j].id, 'compacted', now);
           db.prepare(`UPDATE fact_embeddings SET status = 'compacted' WHERE fact_id = ?`)
             .run(facts[j].id);
           db.prepare(`UPDATE facts SET heat = MAX(heat, ?), base_heat = MAX(base_heat, ?), updated_at = ? WHERE id = ?`)

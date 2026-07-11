@@ -21,6 +21,7 @@ const MIGRATION_FILES = [
   '007_v12_enhancements.sql',
   '008_content_dedup_index.sql',
   '009_repo_grounding.sql',
+  '010_valid_from_backfill.sql',
 ];
 
 const dbState = vi.hoisted(() => ({
@@ -124,7 +125,9 @@ const M4_BASELINE_FAMA_FLOOR = 1.0;
 // 23 -> G8 preference immortalization, 24 -> G12 brief type quotas.
 // Measured M5 baseline pre-G14 fix: MPA 0.6, FAA 0.666667, FAMA 0.544444.
 // Post-G14 fix: FAMA 0.544444 -> 0.677778 (MPA 0.733333, FAA 0.666667).
-const M5_BASELINE_FAMA_FLOOR = 0.677778;
+// G4 supersede chain baseline: FAMA 0.677778 -> 0.877778 (MPA 0.933333);
+// remaining red: 23 (G8), 24 (G12).
+const M5_BASELINE_FAMA_FLOOR = 0.877778;
 
 // Behavior-metric baselines (AutoMem Figure 4 analogues). Deterministic under
 // the fixture workload; both change whenever the question set changes — update
@@ -1429,12 +1432,12 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     });
   });
 
-  test.fails('22 a superseded preference chain is reconstructable (G4)', async () => {
+  test('22 a superseded preference chain is reconstructable (G4)', async () => {
     await evaluateQuestion({
       id: '22',
       title: 'supersede chain timeline',
       booklet: 'm5',
-      expected: 'fail',
+      expected: 'pass',
     }, async ({ criterion }) => {
       const npmId = addFact({
         subject: 'User',

@@ -13,6 +13,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Behavior metrics (AutoMem Figure 4 analogues) are now scored alongside FAMA: `emptySearchRate` and `dedupRate` are asserted against measured baselines (`0.066667`, `0.003731`); the supersede reason distribution and brief row/char cost are recorded in `test-results/memora-score.json` without assertions.
 - Measured M4 booklet baseline at M4-1 (G9/A1/G13 unimplemented): `MPA=0.818182`, `FAA=0.545455`, `FAMA=0.666667`.
 
+#### Supersede Chain and Temporal Validity (G4)
+- The three fields idle since migration 001 are now written. `valid_from` is set at insert (= creation moment; migration 010 backfills existing rows from `created_at`); it is never refreshed — "last confirmed" stays with `last_accessed_at` and dedup heat boosts.
+- `valid_to` is written on every exit from `active`, whatever the reason (superseded/archived/compacted/evicted — the reason is carried by `status`). All four direct status UPDATEs (manual re-save, `memory_forget`, compaction merge, freemium evict) now funnel through `applyFactStatus`, so future exit paths can't miss it. Side effect: `memory_forget` by exact fact id now no-ops on facts that already left `active` instead of rewriting their status.
+- `supersedes_fact_id` is written only for genuine one-to-one replacements — exact supersede, semantic supersede (except `delete` operations), operation `update`, and manual re-save. A chain link means "this fact replaced that one": `move` relies on entity aliases, and archive/evict/compaction carry no replacement semantics. When several decisions fire for one new fact, the first predecessor is kept.
+- No visible surface this round: query chains via `sql_readonly` (the memory schema resource documents the fields); a `memory_timeline` tool is deferred until real query patterns emerge.
+- Exam question 22 flipped from red to green. M5 booklet baseline: `FAMA 0.677778 -> 0.877778` (`MPA=0.933333`). Remaining red: 23 (G8), 24 (G12).
+
 #### Replacement-Cue Word Boundaries (G15)
 - English replacement cues now match on word boundaries (`\b`, covering base verbs plus -s/-es/-ed/-ped inflections) instead of bare substrings: a fact mentioning 'prefix', 'resolver', or 'fixture' no longer falsely fires the 'fix'/'resolve' cue and supersedes unrelated same-subject facts at insert time. CJK cues keep substring matching (no word boundaries in CJK). Sentence-final "now" now counts as a cue (the old `'now '` needed a trailing space).
 - Exam question 21's fixture restores `CACHE_PREFIX` as a natural regression check; scores and behavior baselines are unchanged.

@@ -816,6 +816,81 @@ function evictIfOverLimit(d, factLimit, incoming, now) {
   }
 }
 
+// Executes a repo-grounding plan (grounding-planner.js). Moves insert a real
+// "moved from" fact and reuse the move pass, so alias merge, yielding, and
+// audit behave exactly like a conversational move.
+export function applyRepoGroundingPlan({ projectId, plan, now, floorByType = {} }) {
+  const d = _db;
+  if (!d) throw new Error('DB not set');
+
+  for (const move of plan.moves) {
+    const entityMap = storeEntities([
+      { canonical_name: move.toPath, entity_type: 'file' },
+      { canonical_name: move.fromPath, entity_type: 'file' },
+    ], projectId);
+    const fact = {
+      subject: move.toPath,
+      predicate: 'moved from',
+      object: move.fromPath,
+      detail: 'observed by repo grounding (git rename)',
+      fact_type: 'semantic',
+      confidence: 1.0,
+      operation: 'move',
+      from: move.fromPath,
+      to: move.toPath,
+      scope: 'project',
+    };
+    const [fid] = storeFacts([fact], entityMap, projectId, null, null);
+    if (!fid) continue;
+    if (isVecEnabled()) {
+      // storeFacts only runs the move pass on the non-vec path; grounding
+      // facts carry no embedding, so run it explicitly here.
+      const config = getSupersedeConfig();
+      if (config.enabled) {
+        runMoveOperationPass(d, {
+          projectId,
+          sourceFact: {
+            id: fid,
+            subject: move.toPath,
+            subjectEntityId: entityMap.get(move.toPath),
+            predicate: fact.predicate,
+            objectText: fact.object,
+            scope: 'project',
+            operation: 'move',
+            confidence: 1.0,
+            from: move.fromPath,
+            to: move.toPath,
+          },
+          config,
+          now,
+          excludeFactIds: new Set([fid]),
+        });
+      }
+    }
+    writeAudit(d, { projectId, action: 'repo_grounding', targetType: 'fact', targetId: fid, detail: { result: 'moved', from: move.fromPath, to: move.toPath } });
+  }
+
+  for (const item of plan.markMissing) {
+    const row = d.prepare(`SELECT heat, base_heat, fact_type FROM facts WHERE id = ? AND status = 'active'`).get(item.factId);
+    if (!row) continue;
+    const floor = floorByType[row.fact_type] ?? 0;
+    d.prepare('UPDATE facts SET missing_since = ?, heat = ?, base_heat = ?, updated_at = ? WHERE id = ?')
+      .run(now, Math.max(floor, row.heat * 0.5), Math.max(floor, row.base_heat * 0.5), now, item.factId);
+    writeAudit(d, { projectId, action: 'repo_grounding', targetType: 'fact', targetId: item.factId, detail: { result: 'marked_missing', path: item.path } });
+  }
+
+  for (const item of plan.clearMissing) {
+    d.prepare('UPDATE facts SET missing_since = NULL, updated_at = ? WHERE id = ?').run(now, item.factId);
+    writeAudit(d, { projectId, action: 'repo_grounding', targetType: 'fact', targetId: item.factId, detail: { result: 'cleared_missing', path: item.path } });
+  }
+
+  for (const item of plan.archive) {
+    applyFactStatus(d, item.factId, 'archived', now);
+    syncFactEmbeddingStatus(d, item.factId, 'archived');
+    writeAudit(d, { projectId, action: 'repo_grounding', targetType: 'fact', targetId: item.factId, detail: { result: 'archived', path: item.path } });
+  }
+}
+
 export async function runDecaySweep(config, opts = {}) {
   const d = _db;
   if (!d) return;

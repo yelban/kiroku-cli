@@ -13,6 +13,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Behavior metrics (AutoMem Figure 4 analogues) are now scored alongside FAMA: `emptySearchRate` and `dedupRate` are asserted against measured baselines (`0.066667`, `0.003731`); the supersede reason distribution and brief row/char cost are recorded in `test-results/memora-score.json` without assertions.
 - Measured M4 booklet baseline at M4-1 (G9/A1/G13 unimplemented): `MPA=0.818182`, `FAA=0.545455`, `FAMA=0.666667`.
 
+#### Repo-Grounded Fact Validation (A1)
+- The worker now validates path facts against the repository itself, on the same cadence as the decay sweep. Facts whose subject is an `entity_type='file'` repo-relative path are checked against `git ls-files` plus the filesystem: a missing path is first only marked (`facts.missing_since`, heat halved to the type floor, `repo_grounding` audit row) and archived only when a second sweep confirms it — so branch switches and stashes never kill valid memory. A path that comes back clears its mark.
+- Renames detected via `git diff --find-renames` between `projects.last_swept_commit` and HEAD win over the missing flow: each rename inserts a real "moved from" fact (confidence 1.0, detail notes repo grounding) and reuses the existing move pass, so old-path facts are superseded and the old name lands in the new entity's aliases. A stale base ref resets to HEAD and skips renames for that round; the missing flow backstops.
+- Projects are only swept when `projects.root_path` is recorded (migration 009, written by `kiroku start` and the MCP gateway); the sweep never guesses a path from the cwd slug, runs git strictly read-only with a timeout, and skips the project on any git failure.
+- Set `worker.repoGrounding.enabled` to `false` to disable; `worker.repoGrounding.confirmHours` (default 6) controls the two-sweep confirmation interval.
+- Exam questions 13/14 flipped from red to green (question 14 now also asserts the first detection does NOT kill the fact). M4 booklet baseline: `FAMA 0.774155 -> 0.92` (`MPA=0.92`, `FAA=1.0`). The last remaining red is question 18 (G13 multi-valued predicate false supersede).
+
 #### memory_about MCP Tool (M4-2, G9)
 - New `memory_about(subject)` tool returns ALL active facts about one entity, bypassing `memory_search`'s top-k cut and diversity filter — for summarizing, auditing, or reasoning across everything known about a topic. Results are grouped by fact_type with the same relative-age markers as the brief, capped at 200 facts.
 - Renamed entities resolve through `entities.aliases_json`: querying a retired name (e.g. the old path after a `move` operation chain) lands on the entity that now carries it as an alias, with the resolution noted in the output.

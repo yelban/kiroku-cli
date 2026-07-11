@@ -10,6 +10,7 @@ import { extract, extractBatch, setPromptProvider, setBatchPromptProvider, BATCH
 import { embedTexts, initEmbedder } from './embedder.js';
 import { initPromptLoader, getPrompt, getBatchPrompt, stopPromptLoader } from './prompt-loader.js';
 import { setDb, storeTurn, storeEntities, storeFacts, storeEmbeddings, createExtractionJob, updateExtractionJob, runDecaySweep, runCompactionSweep } from './store.js';
+import { runRepoGroundingSweep } from './repo-grounding.js';
 import { getLicenseState } from '../license/license-state.js';
 import { shouldSkipTurn } from './filter.js';
 import { sharedThrottle as _throttle } from './throttle.js';
@@ -110,6 +111,7 @@ export async function startWorker() {
     const runSweeps = async () => {
       try { await runDecaySweep(config); } catch (err) { log.warn({ err: err.message }, 'decay sweep failed'); }
       try { await runCompactionSweep(db, {}, config.worker.decay); } catch (err) { log.warn({ err: err.message }, 'compaction sweep failed'); }
+      try { await runRepoGroundingSweep(db, config); } catch (err) { log.warn({ err: err.message }, 'repo grounding sweep failed'); }
     };
     // Defer initial sweep to next tick so worker starts polling immediately.
     setImmediate(() => { runSweeps(); });

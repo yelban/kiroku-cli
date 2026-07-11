@@ -20,6 +20,7 @@ const MIGRATION_FILES = [
   '006_audit_log.sql',
   '007_v12_enhancements.sql',
   '008_content_dedup_index.sql',
+  '009_repo_grounding.sql',
 ];
 
 const dbState = vi.hoisted(() => ({
@@ -71,6 +72,7 @@ const sqliteVecProbe = await probeSqliteVec();
 const { selectMemorySearchRows } = await import('../../src/mcp/memory-search.js');
 const { selectProjectBriefRows } = await import('../../src/mcp/project-brief.js');
 const { sqlReadonly } = await import('../../src/mcp/sql-sandbox.js');
+const { runRepoGroundingSweep } = await import('../../src/worker/repo-grounding.js');
 const {
   runDecaySweep,
   setDb,
@@ -110,7 +112,8 @@ const V1_BASELINE_FAMA_FLOOR = 1.0;
 // resolver's same-predicate replacement signal shares the assumption).
 // Measured M4-1 baseline (G9/A1/G13 unimplemented): MPA 0.818182, FAA 0.545455, FAMA 0.666667.
 // M4-2 memory_about (G9) baseline: FAMA 0.666667 -> 0.774155 (MPA 0.913043, FAA 0.615385).
-const M4_BASELINE_FAMA_FLOOR = 0.774155;
+// A1-2 repo grounding baseline: FAMA 0.774155 -> 0.92 (MPA 0.92, FAA 1.0); question 18 (G13) is the last red.
+const M4_BASELINE_FAMA_FLOOR = 0.92;
 
 // Behavior-metric baselines (AutoMem Figure 4 analogues). Deterministic under
 // the fixture workload; both change whenever the question set changes — update
@@ -207,6 +210,26 @@ const QUARTERLY_DECAY_CONFIG = {
     },
   },
 };
+
+const GROUNDING_CONFIG = {
+  worker: {
+    repoGrounding: { enabled: true, confirmHours: 6 },
+    decay: QUARTERLY_DECAY_CONFIG.worker.decay,
+  },
+};
+
+// The grounding sweep only visits projects with a recorded root; snapshots are
+// injected synthetically, so the path never touches a real filesystem.
+function setProjectRoot(projectId = PROJECT_ID, rootPath = '/synthetic/repo') {
+  dbState.db.prepare('UPDATE projects SET root_path = ? WHERE id = ?').run(rootPath, projectId);
+}
+
+async function runGroundingSweep(snapshot, now = NOW_ISO) {
+  await runRepoGroundingSweep(dbState.db, GROUNDING_CONFIG, {
+    now,
+    collectSnapshot: () => ({ ok: true, headCommit: 'synthetic-head', refReset: false, ...snapshot }),
+  });
+}
 
 function registerQueryVector(query, embedding) {
   embedderState.vectors.set(query, embedding);
@@ -980,12 +1003,12 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
   // questions. Red until a repo-grounded validation sweep exists; assertions
   // anchor the end state (stale path facts retired), not any future API shape.
 
-  test.fails('13 batch directory refactor retires every stale path fact (A1)', async () => {
+  test('13 batch directory refactor retires every stale path fact (A1)', async () => {
     await evaluateQuestion({
       id: '13',
       title: 'batch directory refactor',
       booklet: 'm4',
-      expected: 'fail',
+      expected: 'pass',
     }, async ({ criterion }) => {
       const files = ['auth.js', 'db.js', 'http.js', 'cache.js'];
       const pathFactIds = files.map((file, i) => addFact({
@@ -1011,7 +1034,13 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
         createdAt: '2026-03-06T09:00:00.000Z',
       });
 
-      await runDecaySweep(QUARTERLY_DECAY_CONFIG);
+      // Repo ground truth: the whole directory was renamed — git reports it
+      // as one rename per file.
+      setProjectRoot();
+      await runGroundingSweep({
+        renames: files.map(file => ({ from: `src/legacy/${file}`, to: `src/core/${file}` })),
+        missingPaths: files.map(file => `src/legacy/${file}`),
+      });
 
       const rows = await searchRows(query, 5);
       criterion('appear', 'the relocation announcement is retrievable', hasFact(rows, { object_text: 'moved from src/legacy' }), rows.map(row => row.object_text));
@@ -1019,15 +1048,18 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
         const fact = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(pathFactIds[i]);
         criterion('forget', `stale path fact src/legacy/${files[i]} is retired after the directory refactor`, fact.status !== 'active', fact);
       }
+      const newEntity = dbState.db.prepare("SELECT aliases_json FROM entities WHERE canonical_name = 'src/core/auth.js'").get();
+      const aliases = JSON.parse(newEntity?.aliases_json || '[]');
+      criterion('appear', 'the new path entity carries the old path as an alias', aliases.includes('src/legacy/auth.js'), aliases);
     });
   });
 
-  test.fails('14 silent git rename retires the stale doc-path fact (A1)', async () => {
+  test('14 silent file removal retires the stale doc-path fact after confirmation (A1)', async () => {
     await evaluateQuestion({
       id: '14',
-      title: 'silent git rename',
+      title: 'silent removal with two-sweep confirmation',
       booklet: 'm4',
-      expected: 'fail',
+      expected: 'pass',
     }, async ({ criterion }) => {
       // Cold-start search on a topic memory has never seen: the honest answer
       // is zero rows, and the empty-search behavior metric records it.
@@ -1051,15 +1083,23 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
         createdAt: '2026-02-05T09:00:00.000Z',
       });
 
-      // Repo ground truth: `git mv docs/setup.md docs/getting-started.md`
-      // happened with no conversational trace. Today the only sweep surface is
-      // decay; A1's repo-grounded validation will hook in alongside it.
-      await runDecaySweep(QUARTERLY_DECAY_CONFIG);
+      // Repo ground truth: docs/setup.md is gone with no conversational trace
+      // and no rename record to follow (e.g. squashed history) — the missing
+      // flow backstops, with two-sweep confirmation against branch-switch
+      // false kills.
+      setProjectRoot();
+      const missingSnapshot = { renames: [], missingPaths: ['docs/setup.md'] };
+      await runGroundingSweep(missingSnapshot, NOW_ISO);
+
+      const afterFirst = dbState.db.prepare('SELECT status, missing_since FROM facts WHERE id = ?').get(renamedFactId);
+      criterion('appear', 'first detection only marks the fact, no premature kill', afterFirst.status === 'active' && afterFirst.missing_since !== null, afterFirst);
+
+      await runGroundingSweep(missingSnapshot, '2026-03-07T19:00:00.000Z');
 
       const renamed = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(renamedFactId);
-      const control = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(controlFactId);
-      criterion('appear', 'untouched doc fact stays active', control.status === 'active', control);
-      criterion('forget', 'silently renamed doc-path fact is retired', renamed.status !== 'active', renamed);
+      const control = dbState.db.prepare('SELECT status, missing_since FROM facts WHERE id = ?').get(controlFactId);
+      criterion('appear', 'untouched doc fact stays active and unmarked', control.status === 'active' && control.missing_since === null, control);
+      criterion('forget', 'silently removed doc-path fact is retired after the second confirmation', renamed.status !== 'active', renamed);
     });
   });
 

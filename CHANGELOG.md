@@ -7,6 +7,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### mini-FAMA Exam Expansion + Behavior Metrics (M4-1)
+- The exam now runs two booklets. The saturated v1 booklet (questions 01-09) is held as a regression asset asserted at `FAMA >= 1.0`; any drop means an M1-M3 memory behavior regressed. The new M4 booklet (questions 10-20) covers quarterly-horizon timelines with decay/freeze interplay, batch refactor pressure, alias chains, full-subject completeness under mutation, and reasoning via retrieval-completeness plus real `sql_readonly` aggregation.
+- Red questions (`test.fails`) price in open gaps and anchor their acceptance criteria on end states, not future API shapes: 13/14 → A1 repo grounding (a silent `git mv` or batch directory refactor leaves stale path facts active), 18 → G13 multi-valued predicate false supersede (the exact `(subject, predicate)` supersede in `storeFacts` assumes single-valued predicates, so complementary facts like multiple `requires env var` values kill each other; the semantic resolver's same-predicate replacement signal shares the assumption).
+- Behavior metrics (AutoMem Figure 4 analogues) are now scored alongside FAMA: `emptySearchRate` and `dedupRate` are asserted against measured baselines (`0.066667`, `0.003731`); the supersede reason distribution and brief row/char cost are recorded in `test-results/memora-score.json` without assertions.
+- Measured M4 booklet baseline at M4-1 (G9/A1/G13 unimplemented): `MPA=0.818182`, `FAA=0.545455`, `FAMA=0.666667`.
+
 #### Memory Operation Semantics (M3)
 - Extraction prompts now use a four-operation vocabulary: `add` (default new/complementary fact), `update` (new fact supersedes an older version), `delete` (target fact is archived), and `move` (same entity moved/renamed, carrying `{from,to}` identity).
 - `update` and `delete` reuse the semantic supersede resolver with relaxed operation gates; `delete` archives instead of superseding. Without embeddings, operation disposal falls back to exact same-subject matching.

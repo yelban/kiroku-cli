@@ -70,6 +70,7 @@ vi.mock('../../src/worker/embedder.js', () => ({
 const sqliteVecProbe = await probeSqliteVec();
 const { selectMemorySearchRows } = await import('../../src/mcp/memory-search.js');
 const { selectProjectBriefRows } = await import('../../src/mcp/project-brief.js');
+const { sqlReadonly } = await import('../../src/mcp/sql-sandbox.js');
 const {
   runDecaySweep,
   setDb,
@@ -82,12 +83,39 @@ const scoreState = {
   questions: [],
 };
 
+const behaviorState = {
+  searchCalls: 0,
+  emptySearchCalls: 0,
+  writeAttempts: 0,
+  dedupHits: 0,
+  supersedeReasons: {},
+  briefCalls: 0,
+  briefRowCount: 0,
+  briefChars: 0,
+};
+
+// v1 booklet (questions 01-09), saturated at 1.0 since M3-2. Held as a
+// regression asset: any drop means an M1-M3 memory behavior regressed.
 // Measured M1-3 mixed-ranking baseline: 0.673797 -> 0.764706.
 // M2-2 semantic supersede baseline: 0.764706 -> 0.882353.
 // M3-1 update/delete operation baseline: 0.882353 -> 0.941176.
 // M3-2 move operation baseline: 0.941176 -> 1.0.
 // Update only when a memory-behavior change intentionally changes the mini-FAMA score and the new baseline is reviewed.
-const BASELINE_FAMA_FLOOR = 1.0;
+const V1_BASELINE_FAMA_FLOOR = 1.0;
+
+// M4 booklet (questions 10-20). Red questions (test.fails) price in the open
+// gaps they anchor: 13/14 -> A1 repo grounding, 16/17 -> G9 memory_about,
+// 18 -> G13 multi-valued predicate false supersede (exact (subject, predicate)
+// supersede in storeFacts assumes single-valued predicates; the semantic
+// resolver's same-predicate replacement signal shares the assumption).
+// Measured M4-1 baseline (G9/A1/G13 unimplemented): MPA 0.818182, FAA 0.545455, FAMA 0.666667.
+const M4_BASELINE_FAMA_FLOOR = 0.666667;
+
+// Behavior-metric baselines (AutoMem Figure 4 analogues). Deterministic under
+// the fixture workload; both change whenever the question set changes — update
+// consciously alongside the floors above.
+const EMPTY_SEARCH_RATE_BASELINE = 0.066667; // 1 cold-start empty search / 15 searches
+const DEDUP_RATE_BASELINE = 0.003731;        // 1 deliberate repeat-write / 268 write attempts
 
 function createMemoraDb() {
   const db = new Database(':memory:');
@@ -152,6 +180,33 @@ const BGE_M3_FIXTURE_COSINES = {
   q05MovedFile: 0.87,           // measured 0.867245
 };
 
+// Repo defaults from config.js worker.decay, with freezing disabled: freeze
+// detection reads SQLite's real clock, so per-question sweeps pin it off and
+// question 11 opts back in with deterministic extreme last_active_at dates.
+const QUARTERLY_DECAY_CONFIG = {
+  worker: {
+    decay: {
+      enabled: true,
+      halfLifeHours: 168,
+      halfLifeByType: {
+        state: 168,
+        episodic: 336,
+        task: 504,
+        semantic: 1440,
+        preference: null,
+      },
+      floorByType: {
+        state: 0.05,
+        episodic: 0.1,
+        task: 0.15,
+        semantic: 0.3,
+        preference: 0.7,
+      },
+      freezeAfterInactiveDays: 0,
+    },
+  },
+};
+
 function registerQueryVector(query, embedding) {
   embedderState.vectors.set(query, embedding);
 }
@@ -179,6 +234,7 @@ function addFact({
   heat = 0.7,
   baseHeat = heat,
   accessCount = 0,
+  allowDedup = false,
 }) {
   ensureProject(projectId);
   const entityNames = [...new Set([subject, endpointName(from), endpointName(to)].filter(Boolean))];
@@ -198,8 +254,13 @@ function addFact({
     to,
     scope,
   };
+  behaviorState.writeAttempts += 1;
   const [factId] = storeFacts([fact], entityMap, projectId, null, null);
-  if (!factId) throw new Error(`Fact was unexpectedly deduped: ${subject} ${predicate} ${object}`);
+  if (!factId) {
+    behaviorState.dedupHits += 1;
+    if (allowDedup) return null;
+    throw new Error(`Fact was unexpectedly deduped: ${subject} ${predicate} ${object}`);
+  }
 
   dbState.db.prepare(`
     UPDATE facts
@@ -221,17 +282,39 @@ function endpointName(endpoint) {
   return endpoint.canonical_name || endpoint.name || null;
 }
 
-async function searchRows(query, topK = 10) {
+async function searchRows(query, topK = 10, projectId = PROJECT_ID) {
   const rows = await selectMemorySearchRows({
     query,
-    project_id: PROJECT_ID,
+    project_id: projectId,
     top_k: topK,
     scope: 'all',
   });
+  behaviorState.searchCalls += 1;
+  if (rows.length === 0) behaviorState.emptySearchCalls += 1;
   if (rows.length > 0 && !rows.every(row => typeof row.distance === 'number')) {
     throw new Error('Expected sqlite-vec path; selectMemorySearchRows returned text-search rows.');
   }
   return rows;
+}
+
+function briefRows(config, projectId = PROJECT_ID) {
+  const rows = selectProjectBriefRows(dbState.db, projectId, config);
+  behaviorState.briefCalls += 1;
+  behaviorState.briefRowCount += rows.length;
+  behaviorState.briefChars += rows.reduce(
+    (sum, r) => sum + `[${r.fact_type}] ${r.subject || '?'} ${r.predicate} ${r.object_text}`.length,
+    0,
+  );
+  return rows;
+}
+
+async function loadMemoryAbout() {
+  try {
+    const mod = await import('../../src/mcp/memory-about.js');
+    return typeof mod.selectMemoryAboutRows === 'function' ? mod : null;
+  } catch {
+    return null;
+  }
 }
 
 function hasFact(rows, matcher) {
@@ -263,6 +346,7 @@ async function evaluateQuestion(meta, fn) {
   scoreState.questions.push({
     id: meta.id,
     title: meta.title,
+    booklet: meta.booklet ?? 'v1',
     expected: meta.expected,
     passed,
     criteria,
@@ -277,8 +361,8 @@ async function evaluateQuestion(meta, fn) {
   ).toBe(true);
 }
 
-function computeScore() {
-  const criteria = scoreState.questions.flatMap(question => (
+function computeScore(questions) {
+  const criteria = questions.flatMap(question => (
     question.criteria.map(criterion => ({ questionId: question.id, ...criterion }))
   ));
   const appearanceCriteria = criteria.filter(criterion => criterion.kind === 'appear');
@@ -303,7 +387,24 @@ function computeScore() {
       passed: passedForgetting,
       total: forgettingCriteria.length,
     },
-    questions: scoreState.questions,
+    questions,
+  };
+}
+
+function computeBehavior() {
+  return {
+    searchCalls: behaviorState.searchCalls,
+    emptySearchCalls: behaviorState.emptySearchCalls,
+    emptySearchRate: roundScore(behaviorState.emptySearchCalls / Math.max(1, behaviorState.searchCalls)),
+    writeAttempts: behaviorState.writeAttempts,
+    dedupHits: behaviorState.dedupHits,
+    dedupRate: roundScore(behaviorState.dedupHits / Math.max(1, behaviorState.writeAttempts)),
+    supersedeReasons: behaviorState.supersedeReasons,
+    brief: {
+      calls: behaviorState.briefCalls,
+      rows: behaviorState.briefRowCount,
+      chars: behaviorState.briefChars,
+    },
   };
 }
 
@@ -314,7 +415,9 @@ function roundScore(value) {
 function writeScore(score) {
   mkdirSync(dirname(SCORE_PATH), { recursive: true });
   writeFileSync(SCORE_PATH, `${JSON.stringify(score, null, 2)}\n`);
-  console.info(`[memora-fama] MPA=${score.mpa} FAA=${score.faa} FAMA=${score.fama}`);
+  const fmt = s => `MPA=${s.mpa} FAA=${s.faa} FAMA=${s.fama}`;
+  console.info(`[memora-fama] v1: ${fmt(score.booklets.v1)} | m4: ${fmt(score.booklets.m4)} | overall: ${fmt(score.overall)}`);
+  console.info(`[memora-fama] behavior: emptySearchRate=${score.behavior.emptySearchRate} dedupRate=${score.behavior.dedupRate} supersede=${JSON.stringify(score.behavior.supersedeReasons)}`);
 }
 
 describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-vec', () => {
@@ -332,6 +435,21 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
   });
 
   afterEach(() => {
+    if (dbState.db) {
+      try {
+        const rows = dbState.db.prepare(
+          `SELECT action, detail_json FROM audit_logs WHERE action IN ('memory_operation', 'semantic_supersede')`
+        ).all();
+        for (const row of rows) {
+          let detail = {};
+          try { detail = JSON.parse(row.detail_json || '{}'); } catch { /* unreadable detail */ }
+          const key = row.action === 'memory_operation'
+            ? `${detail.operation || 'unknown'}:${detail.result || 'unknown'}${detail.reason ? `:${detail.reason}` : ''}`
+            : 'semantic_supersede:applied';
+          behaviorState.supersedeReasons[key] = (behaviorState.supersedeReasons[key] || 0) + 1;
+        }
+      } catch { /* behavior harvest is best-effort */ }
+    }
     dbState.db?.close();
     dbState.db = null;
     dbState.vecEnabled = false;
@@ -339,10 +457,25 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
   });
 
   afterAll(() => {
-    expect(scoreState.questions).toHaveLength(9);
-    const score = computeScore();
+    const v1Questions = scoreState.questions.filter(question => question.booklet === 'v1');
+    const m4Questions = scoreState.questions.filter(question => question.booklet === 'm4');
+    expect(v1Questions).toHaveLength(9);
+    expect(m4Questions).toHaveLength(11);
+
+    const score = {
+      booklets: {
+        v1: computeScore(v1Questions),
+        m4: computeScore(m4Questions),
+      },
+      overall: computeScore(scoreState.questions),
+      behavior: computeBehavior(),
+    };
     writeScore(score);
-    expect(score.fama).toBeGreaterThanOrEqual(BASELINE_FAMA_FLOOR);
+
+    expect(score.booklets.v1.fama).toBeGreaterThanOrEqual(V1_BASELINE_FAMA_FLOOR);
+    expect(score.booklets.m4.fama).toBeGreaterThanOrEqual(M4_BASELINE_FAMA_FLOOR);
+    expect(score.behavior.emptySearchRate).toBe(EMPTY_SEARCH_RATE_BASELINE);
+    expect(score.behavior.dedupRate).toBe(DEDUP_RATE_BASELINE);
   });
 
   test('01 preference reversal excludes the old preference', async () => {
@@ -683,13 +816,514 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
       });
 
       const oldFact = dbState.db.prepare('SELECT heat, decay_bucket FROM facts WHERE id = ?').get(oldFactId);
-      const briefRows = selectProjectBriefRows(dbState.db, PROJECT_ID, { maxFacts: 3 });
+      const brief = briefRows({ maxFacts: 3 });
 
-      criterion('appear', 'current hot state facts remain eligible for brief', briefRows.length === 3 && briefRows.every(row => row.subject.startsWith('CurrentState')), briefRows.map(row => row.subject));
-      criterion('forget', 'decayed stale state fact reaches cold floor and is not selected into brief', oldFact.heat <= 0.051 && oldFact.decay_bucket === 'cold' && !hasFact(briefRows, { subject: 'DeprecatedState' }), {
-        briefSubjects: briefRows.map(row => row.subject),
+      criterion('appear', 'current hot state facts remain eligible for brief', brief.length === 3 && brief.every(row => row.subject.startsWith('CurrentState')), brief.map(row => row.subject));
+      criterion('forget', 'decayed stale state fact reaches cold floor and is not selected into brief', oldFact.heat <= 0.051 && oldFact.decay_bucket === 'cold' && !hasFact(brief, { subject: 'DeprecatedState' }), {
+        briefSubjects: brief.map(row => row.subject),
         oldFact,
       });
+    });
+  });
+
+  // ── M4 booklet ──────────────────────────────────────────────────────────
+  // Category 1: quarterly-horizon timelines (decay/freeze interplay).
+
+  test('10 quarterly-distant semantic fact survives decay and noise', async () => {
+    await evaluateQuestion({
+      id: '10',
+      title: 'quarterly distant recall',
+      booklet: 'm4',
+      expected: 'pass',
+    }, async ({ criterion }) => {
+      const query = 'auth token strategy decision';
+      const queryVector = basis(30);
+      registerQueryVector(query, queryVector);
+
+      const oldFactId = addFact({
+        subject: 'AuthArchitecture',
+        predicate: 'chose token strategy',
+        object: 'stateless JWT with refresh rotation',
+        embedding: queryVector,
+        createdAt: '2025-12-01T09:00:00.000Z',
+      });
+
+      const noiseMonths = ['2025-12', '2026-01', '2026-02'];
+      for (let i = 0; i < 120; i++) {
+        addFact({
+          subject: `QuarterNoise${i}`,
+          predicate: 'mentions',
+          object: `interim implementation note ${i}`,
+          embedding: basis(100 + i),
+          createdAt: `${noiseMonths[i % 3]}-${String((i % 27) + 1).padStart(2, '0')}T09:00:00.000Z`,
+        });
+      }
+
+      await runDecaySweep(QUARTERLY_DECAY_CONFIG);
+
+      const oldFact = dbState.db.prepare('SELECT heat, decay_bucket FROM facts WHERE id = ?').get(oldFactId);
+      const rows = await searchRows(query, 5);
+      criterion('appear', 'quarterly-old semantic fact is still retrieved through 120 noise facts', hasFact(rows, { object_text: 'stateless JWT with refresh rotation' }), rows.map(row => row.object_text));
+      criterion('appear', 'semantic floor keeps the quarterly-old fact from evaporating', oldFact.heat >= 0.299, oldFact);
+    });
+  });
+
+  test('11 frozen dormant project keeps memory heat intact while active projects decay', async () => {
+    await evaluateQuestion({
+      id: '11',
+      title: 'project freeze at quarterly horizon',
+      booklet: 'm4',
+      expected: 'pass',
+    }, async ({ criterion }) => {
+      const query = 'dormant pipeline blocker';
+      const queryVector = basis(31);
+      registerQueryVector(query, queryVector);
+
+      const frozenFactId = addFact({
+        subject: 'DormantPipeline',
+        predicate: 'currently blocks',
+        object: 'nightly export job',
+        factType: 'state',
+        projectId: 'memora-frozen-project',
+        embedding: queryVector,
+        createdAt: '2026-01-01T09:00:00.000Z',
+        heat: 1.0,
+        baseHeat: 1.0,
+      });
+      const activeFactId = addFact({
+        subject: 'ActivePipeline',
+        predicate: 'currently blocks',
+        object: 'weekly import job',
+        factType: 'state',
+        projectId: 'memora-active-project',
+        embedding: basis(32),
+        createdAt: '2026-01-01T09:00:00.000Z',
+        heat: 1.0,
+        baseHeat: 1.0,
+      });
+
+      // Freeze detection compares projects.last_active_at against SQLite's
+      // real clock (datetime('now')), which fake timers do not reach — pin
+      // both projects to extreme dates so the fixture stays deterministic.
+      dbState.db.prepare('UPDATE projects SET last_active_at = ? WHERE id = ?')
+        .run('2000-01-01T00:00:00.000Z', 'memora-frozen-project');
+      dbState.db.prepare('UPDATE projects SET last_active_at = ? WHERE id = ?')
+        .run('9999-01-01T00:00:00.000Z', 'memora-active-project');
+
+      await runDecaySweep({
+        worker: { decay: { ...QUARTERLY_DECAY_CONFIG.worker.decay, freezeAfterInactiveDays: 7 } },
+      });
+
+      const frozenFact = dbState.db.prepare('SELECT heat FROM facts WHERE id = ?').get(frozenFactId);
+      const activeFact = dbState.db.prepare('SELECT heat FROM facts WHERE id = ?').get(activeFactId);
+      const rows = await searchRows(query, 5, 'memora-frozen-project');
+
+      criterion('appear', 'dormant project fact keeps full heat under freeze', frozenFact.heat >= 0.999, frozenFact);
+      criterion('appear', 'dormant project fact is still retrievable on revival', hasFact(rows, { object_text: 'nightly export job' }), rows.map(row => row.object_text));
+      criterion('forget', 'same-age fact in an active project decays to the state floor', activeFact.heat <= 0.051, activeFact);
+    });
+  });
+
+  test('12 type-aware half-lives hold at the quarterly horizon', async () => {
+    await evaluateQuestion({
+      id: '12',
+      title: 'quarterly type-aware decay',
+      booklet: 'm4',
+      expected: 'pass',
+    }, async ({ criterion }) => {
+      addFact({
+        subject: 'DataModel',
+        predicate: 'documents invariant',
+        object: 'facts are append-only with a status lifecycle',
+        embedding: basis(33),
+        createdAt: '2025-12-07T09:00:00.000Z',
+      });
+      const staleStateId = addFact({
+        subject: 'LegacyIncident',
+        predicate: 'currently blocks',
+        object: 'v0 importer rollout',
+        factType: 'state',
+        embedding: basis(34),
+        createdAt: '2025-12-07T09:00:00.000Z',
+        heat: 1.0,
+        baseHeat: 1.0,
+      });
+      for (let i = 0; i < 3; i++) {
+        addFact({
+          subject: `FreshOps${i}`,
+          predicate: 'tracks',
+          object: `current rollout guard ${i}`,
+          factType: 'state',
+          embedding: basis(40 + i),
+          createdAt: '2026-03-06T09:00:00.000Z',
+          heat: 1.0,
+          baseHeat: 1.0,
+        });
+      }
+
+      await runDecaySweep(QUARTERLY_DECAY_CONFIG);
+
+      const staleState = dbState.db.prepare('SELECT heat, decay_bucket FROM facts WHERE id = ?').get(staleStateId);
+      const brief = briefRows({ maxFacts: 4 });
+
+      criterion('appear', 'quarterly-old semantic fact still reaches the brief via its floor', hasFact(brief, { subject: 'DataModel' }), brief.map(row => row.subject));
+      criterion('appear', 'fresh state facts fill the remaining brief slots', brief.filter(row => row.subject.startsWith('FreshOps')).length === 3, brief.map(row => row.subject));
+      criterion('forget', 'quarterly-old state fact reaches the cold floor and stays out of the brief', staleState.heat <= 0.051 && staleState.decay_bucket === 'cold' && !hasFact(brief, { subject: 'LegacyIncident' }), {
+        briefSubjects: brief.map(row => row.subject),
+        staleState,
+      });
+    });
+  });
+
+  // Category 2: batch refactor pressure — A1 (repo grounding) acceptance
+  // questions. Red until a repo-grounded validation sweep exists; assertions
+  // anchor the end state (stale path facts retired), not any future API shape.
+
+  test.fails('13 batch directory refactor retires every stale path fact (A1)', async () => {
+    await evaluateQuestion({
+      id: '13',
+      title: 'batch directory refactor',
+      booklet: 'm4',
+      expected: 'fail',
+    }, async ({ criterion }) => {
+      const files = ['auth.js', 'db.js', 'http.js', 'cache.js'];
+      const pathFactIds = files.map((file, i) => addFact({
+        subject: `src/legacy/${file}`,
+        predicate: 'contains',
+        object: `${file.replace('.js', '')} module implementation`,
+        embedding: basis(60 + i),
+        createdAt: '2026-02-10T09:00:00.000Z',
+      }));
+
+      const query = 'where did the legacy modules move';
+      const queryVector = basis(64);
+      registerQueryVector(query, queryVector);
+      addFact({
+        subject: 'src/core',
+        predicate: 'now hosts the legacy modules',
+        object: 'moved from src/legacy',
+        operation: 'move',
+        from: 'src/legacy',
+        to: 'src/core',
+        confidence: 0.9,
+        embedding: queryVector,
+        createdAt: '2026-03-06T09:00:00.000Z',
+      });
+
+      await runDecaySweep(QUARTERLY_DECAY_CONFIG);
+
+      const rows = await searchRows(query, 5);
+      criterion('appear', 'the relocation announcement is retrievable', hasFact(rows, { object_text: 'moved from src/legacy' }), rows.map(row => row.object_text));
+      for (let i = 0; i < files.length; i++) {
+        const fact = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(pathFactIds[i]);
+        criterion('forget', `stale path fact src/legacy/${files[i]} is retired after the directory refactor`, fact.status !== 'active', fact);
+      }
+    });
+  });
+
+  test.fails('14 silent git rename retires the stale doc-path fact (A1)', async () => {
+    await evaluateQuestion({
+      id: '14',
+      title: 'silent git rename',
+      booklet: 'm4',
+      expected: 'fail',
+    }, async ({ criterion }) => {
+      // Cold-start search on a topic memory has never seen: the honest answer
+      // is zero rows, and the empty-search behavior metric records it.
+      const coldQuery = 'getting started guide path';
+      registerQueryVector(coldQuery, basis(72));
+      const coldRows = await searchRows(coldQuery, 5);
+      criterion('appear', 'unknown topic yields an honest empty result instead of a fabricated one', coldRows.length === 0, coldRows.map(row => row.object_text));
+
+      const renamedFactId = addFact({
+        subject: 'docs/setup.md',
+        predicate: 'documents',
+        object: 'installation flow',
+        embedding: basis(70),
+        createdAt: '2026-02-05T09:00:00.000Z',
+      });
+      const controlFactId = addFact({
+        subject: 'docs/api.md',
+        predicate: 'documents',
+        object: 'HTTP endpoint reference',
+        embedding: basis(71),
+        createdAt: '2026-02-05T09:00:00.000Z',
+      });
+
+      // Repo ground truth: `git mv docs/setup.md docs/getting-started.md`
+      // happened with no conversational trace. Today the only sweep surface is
+      // decay; A1's repo-grounded validation will hook in alongside it.
+      await runDecaySweep(QUARTERLY_DECAY_CONFIG);
+
+      const renamed = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(renamedFactId);
+      const control = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(controlFactId);
+      criterion('appear', 'untouched doc fact stays active', control.status === 'active', control);
+      criterion('forget', 'silently renamed doc-path fact is retired', renamed.status !== 'active', renamed);
+    });
+  });
+
+  // Category 3: multi-entity alias chains.
+
+  test('15 chained rename A→B→C consolidates aliases and retires stale paths', async () => {
+    await evaluateQuestion({
+      id: '15',
+      title: 'alias chain across two renames',
+      booklet: 'm4',
+      expected: 'pass',
+    }, async ({ criterion }) => {
+      const originalId = addFact({
+        subject: 'src/utils/format.js',
+        predicate: 'contains',
+        object: 'currency formatter',
+        embedding: basis(80),
+        createdAt: '2026-02-01T09:00:00.000Z',
+      });
+      const firstMoveId = addFact({
+        subject: 'src/lib/format.js',
+        predicate: 'now contains',
+        object: 'currency formatter',
+        operation: 'move',
+        from: 'src/utils/format.js',
+        to: 'src/lib/format.js',
+        confidence: 0.9,
+        embedding: basis(81),
+        createdAt: '2026-02-20T09:00:00.000Z',
+      });
+      const query = 'currency formatter file location';
+      const queryVector = basis(82);
+      registerQueryVector(query, queryVector);
+      addFact({
+        subject: 'src/money/format.js',
+        predicate: 'now contains',
+        object: 'currency formatter',
+        operation: 'move',
+        from: 'src/lib/format.js',
+        to: 'src/money/format.js',
+        confidence: 0.9,
+        embedding: queryVector,
+        createdAt: '2026-03-05T09:00:00.000Z',
+      });
+
+      const rows = await searchRows(query, 5);
+      const original = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(originalId);
+      const firstMove = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(firstMoveId);
+      const finalEntity = dbState.db.prepare("SELECT aliases_json FROM entities WHERE canonical_name = 'src/money/format.js'").get();
+      const aliases = JSON.parse(finalEntity?.aliases_json || '[]');
+
+      criterion('appear', 'final path fact is retrievable', hasFact(rows, { subject: 'src/money/format.js' }), rows.map(row => row.subject));
+      criterion('appear', 'final entity carries both prior names as aliases', aliases.includes('src/utils/format.js') && aliases.includes('src/lib/format.js'), aliases);
+      criterion('forget', 'original path fact is retired by the first move', original.status !== 'active', original);
+      criterion('forget', 'intermediate path fact is retired by the second move', firstMove.status !== 'active', firstMove);
+    });
+  });
+
+  test.fails('16 alias-aware full retrieval resolves a renamed entity (G9)', async () => {
+    await evaluateQuestion({
+      id: '16',
+      title: 'alias-aware full-subject retrieval',
+      booklet: 'm4',
+      expected: 'fail',
+    }, async ({ criterion }) => {
+      addFact({
+        subject: 'src/old/telemetry.js',
+        predicate: 'contains',
+        object: 'span exporter',
+        embedding: basis(85),
+        createdAt: '2026-02-01T09:00:00.000Z',
+      });
+      addFact({
+        subject: 'src/obs/telemetry.js',
+        predicate: 'now contains',
+        object: 'span exporter',
+        operation: 'move',
+        from: 'src/old/telemetry.js',
+        to: 'src/obs/telemetry.js',
+        confidence: 0.9,
+        embedding: basis(86),
+        createdAt: '2026-02-20T09:00:00.000Z',
+      });
+      addFact({
+        subject: 'src/obs/telemetry.js',
+        predicate: 'exports',
+        object: 'OTLP batching helper',
+        embedding: basis(87),
+        createdAt: '2026-03-01T09:00:00.000Z',
+      });
+
+      const about = await loadMemoryAbout();
+      if (!about) {
+        criterion('appear', 'memory_about seam available (G9)', false, 'module src/mcp/memory-about.js not implemented yet');
+        return;
+      }
+      const rows = about.selectMemoryAboutRows(dbState.db, { subject: 'src/old/telemetry.js', projectId: PROJECT_ID });
+      criterion('appear', 'the old name resolves via alias to the current entity facts', rows.length >= 2 && rows.some(row => row.object_text === 'OTLP batching helper'), rows.map(row => `${row.predicate} ${row.object_text}`));
+      criterion('forget', 'the superseded old-path fact is not included', !rows.some(row => row.predicate === 'contains' && row.object_text === 'span exporter'), rows.map(row => `${row.predicate} ${row.object_text}`));
+    });
+  });
+
+  // Category 4: full-subject completeness — G9 acceptance questions.
+
+  test.fails('17 full-subject retrieval is complete under mutation (G9)', async () => {
+    await evaluateQuestion({
+      id: '17',
+      title: 'full-subject completeness beyond top-k',
+      booklet: 'm4',
+      expected: 'fail',
+    }, async ({ criterion }) => {
+      const attributes = [
+        ['listens on port', '8443'],
+        ['authenticates via', 'mTLS client certs'],
+        ['retry limit', '3'],
+        ['persists ledger in', 'payments.sqlite'],
+        ['emits metrics to', 'statsd on 8125'],
+        ['depends on', 'stripe SDK v14'],
+        ['deploys from', 'payments-deploy pipeline'],
+        ['owned by', 'billing team'],
+        ['rate limits at', '200 rps per key'],
+        ['stores secrets in', 'vault kv/payments'],
+        ['health check at', '/internal/healthz'],
+        ['logs to', 'payments.log with pino'],
+      ];
+      attributes.forEach(([predicate, object], i) => addFact({
+        subject: 'PaymentsService',
+        predicate,
+        object,
+        embedding: basis(90 + i),
+        createdAt: `2026-02-${String(i + 1).padStart(2, '0')}T09:00:00.000Z`,
+      }));
+      addFact({
+        subject: 'PaymentsService',
+        predicate: 'retry limit',
+        object: '5',
+        operation: 'update',
+        confidence: 0.9,
+        embedding: pairedVector(92, 0.85),
+        createdAt: '2026-03-03T09:00:00.000Z',
+      });
+
+      const about = await loadMemoryAbout();
+      if (!about) {
+        criterion('appear', 'memory_about seam available (G9)', false, 'module src/mcp/memory-about.js not implemented yet');
+        return;
+      }
+      const rows = about.selectMemoryAboutRows(dbState.db, { subject: 'PaymentsService', projectId: PROJECT_ID });
+      criterion('appear', 'every active fact about the subject is returned (beyond default top-k)', rows.length === 12, rows.length);
+      criterion('appear', 'the updated retry limit is present', rows.some(row => row.predicate === 'retry limit' && row.object_text === '5'), rows.filter(row => row.predicate === 'retry limit').map(row => row.object_text));
+      criterion('forget', 'the superseded retry limit is excluded', !rows.some(row => row.predicate === 'retry limit' && row.object_text === '3'), rows.filter(row => row.predicate === 'retry limit').map(row => row.object_text));
+    });
+  });
+
+  test.fails('18 multi-valued predicate facts coexist and are fully retrievable (G13/G9)', async () => {
+    await evaluateQuestion({
+      id: '18',
+      title: 'multi-valued predicate completeness',
+      booklet: 'm4',
+      expected: 'fail',
+    }, async ({ criterion }) => {
+      const envVars = ['DEPLOY_KEY', 'DEPLOY_REGION', 'DEPLOY_BUCKET', 'DEPLOY_ROLE', 'DEPLOY_TIMEOUT', 'DEPLOY_CHANNEL'];
+      const factIds = envVars.map((name, i) => addFact({
+        subject: 'DeployPipeline',
+        predicate: 'requires env var',
+        object: `${name} set`,
+        embedding: basis(50),
+        createdAt: `2026-02-${String(i + 1).padStart(2, '0')}T09:00:00.000Z`,
+      }));
+
+      const statuses = factIds.map(id => dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(id).status);
+      criterion('appear', 'complementary same-predicate facts all stay active (no false supersede)', statuses.every(status => status === 'active'), statuses);
+
+      const about = await loadMemoryAbout();
+      if (!about) {
+        criterion('appear', 'memory_about seam available (G9)', false, 'module src/mcp/memory-about.js not implemented yet');
+        return;
+      }
+      const rows = about.selectMemoryAboutRows(dbState.db, { subject: 'DeployPipeline', projectId: PROJECT_ID });
+      criterion('appear', 'full-subject mode returns every required env var', envVars.every(name => rows.some(row => row.object_text === `${name} set`)), rows.map(row => row.object_text));
+    });
+  });
+
+  // Category 5: reasoning — retrieval-completeness proxy plus real SQL
+  // aggregation through the sql_readonly sandbox.
+
+  test('19 scattered numeric facts are fully retrievable and aggregate via SQL', async () => {
+    await evaluateQuestion({
+      id: '19',
+      title: 'scattered numeric aggregation',
+      booklet: 'm4',
+      expected: 'pass',
+    }, async ({ criterion }) => {
+      const query = 'ci minutes usage';
+      const queryVector = basis(95);
+      registerQueryVector(query, queryVector);
+
+      const weeks = [['week1 usage', '1200'], ['week2 usage', '950'], ['week3 usage', '1430'], ['week4 usage', '1010']];
+      weeks.forEach(([predicate, object], i) => addFact({
+        subject: 'CIMinutes',
+        predicate,
+        object,
+        embedding: queryVector,
+        createdAt: `2026-02-${String((i + 1) * 7).padStart(2, '0')}T09:00:00.000Z`,
+      }));
+      // A repeated observation of the same fact must dedup, not double-count
+      // in the aggregate below (repeat-write behavior metric).
+      addFact({
+        subject: 'CIMinutes',
+        predicate: 'week2 usage',
+        object: '950',
+        embedding: queryVector,
+        createdAt: '2026-03-01T09:00:00.000Z',
+        allowDedup: true,
+      });
+
+      const rows = await searchRows(query, 5);
+      for (const [predicate, object] of weeks) {
+        criterion('appear', `${predicate} is retrievable`, hasFact(rows, { predicate, object_text: object }), rows.map(row => `${row.predicate} ${row.object_text}`));
+      }
+
+      const table = sqlReadonly({
+        sql: `SELECT SUM(CAST(object_text AS INTEGER)) AS total_minutes FROM facts WHERE project_id = '${PROJECT_ID}' AND predicate LIKE 'week% usage' AND status = 'active'`,
+      }, { maxRows: 10 });
+      criterion('appear', 'sql_readonly aggregates the scattered values to the correct total', table.includes('| 4590 |'), table);
+    });
+  });
+
+  test('20 SQL aggregation reflects mutation and excludes the superseded value', async () => {
+    await evaluateQuestion({
+      id: '20',
+      title: 'aggregation over mutated facts',
+      booklet: 'm4',
+      expected: 'pass',
+    }, async ({ criterion }) => {
+      const query = 'api monthly budget limit';
+      const queryVector = basis(99);
+      registerQueryVector(query, queryVector);
+
+      addFact({
+        subject: 'ApiBudget',
+        predicate: 'monthly limit',
+        object: '500',
+        embedding: queryVector,
+        createdAt: '2026-02-01T09:00:00.000Z',
+      });
+      addFact({
+        subject: 'ApiBudget',
+        predicate: 'monthly limit',
+        object: '800',
+        operation: 'update',
+        confidence: 0.9,
+        embedding: pairedVector(99, 0.85),
+        createdAt: '2026-03-01T09:00:00.000Z',
+      });
+
+      const rows = await searchRows(query, 5);
+      criterion('appear', 'the updated budget is retrievable', hasFact(rows, { object_text: '800' }), rows.map(row => row.object_text));
+      criterion('forget', 'the superseded budget does not reappear in search', !hasFact(rows, { object_text: '500' }), rows.map(row => row.object_text));
+
+      const table = sqlReadonly({
+        sql: `SELECT object_text FROM facts WHERE project_id = '${PROJECT_ID}' AND predicate = 'monthly limit' AND status = 'active'`,
+      }, { maxRows: 10 });
+      criterion('appear', 'SQL over active facts sees the updated value', table.includes('| 800 |'), table);
+      criterion('forget', 'SQL over active facts excludes the superseded value', !table.includes('| 500 |'), table);
     });
   });
 });

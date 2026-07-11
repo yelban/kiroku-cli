@@ -25,6 +25,20 @@ async function main() {
   const projectId = process.env.KIROKU_PROJECT_ID || 'default';
   log.info({ projectId }, 'MCP gateway starting');
 
+  // Backfill the project root for installs that never re-ran `kiroku start`:
+  // the gateway is spawned in the project directory, so its cwd is the root.
+  if (projectId !== 'default') {
+    try {
+      const db = getDb();
+      const nowIso = new Date().toISOString();
+      db.prepare('INSERT OR IGNORE INTO projects (id, name) VALUES (?, ?)').run(projectId, projectId);
+      db.prepare('UPDATE projects SET root_path = ?, updated_at = ? WHERE id = ? AND (root_path IS NULL OR root_path != ?)')
+        .run(process.cwd(), nowIso, projectId, process.cwd());
+    } catch (err) {
+      log.warn({ err: err.message }, 'project root registration failed');
+    }
+  }
+
   const server = new McpServer({
     name: config.mcp.serverName,
     version: config.mcp.serverVersion,

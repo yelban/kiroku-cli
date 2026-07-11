@@ -221,6 +221,21 @@ async function cmdStart() {
   // Write .mcp.json for MCP server registration
   const mcpJsonPath = join(process.cwd(), '.mcp.json');
   const projectSlug = process.cwd().replace(/[\\/]/g, '-').replace(/^-/, '');
+
+  // Record the project root: the slug is a lossy projection of the cwd, and
+  // the worker's repo-grounding sweep must never guess a path by reversing it.
+  try {
+    const { initDb, runMigrations, closeDb } = await import('../src/shared/db.js');
+    const db = await initDb();
+    runMigrations();
+    const nowIso = new Date().toISOString();
+    db.prepare('INSERT OR IGNORE INTO projects (id, name) VALUES (?, ?)').run(projectSlug, projectSlug);
+    db.prepare('UPDATE projects SET root_path = ?, updated_at = ? WHERE id = ? AND (root_path IS NULL OR root_path != ?)')
+      .run(process.cwd(), nowIso, projectSlug, process.cwd());
+    closeDb();
+  } catch (err) {
+    console.log(`  (project root registration skipped: ${err.message})`);
+  }
   const mcpScript = USE_DIST
     ? join(ROOT, 'dist', 'mcp.cjs')
     : join(ROOT, 'src', 'mcp', 'server.js');

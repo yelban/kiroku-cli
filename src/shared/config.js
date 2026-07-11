@@ -115,6 +115,10 @@ const ConfigSchema = z.object({
       }),
       freezeAfterInactiveDays: z.number().default(7),
     }).default({}),
+    repoGrounding: z.object({
+      enabled: z.boolean().default(true),
+      confirmHours: z.number().default(6),
+    }).default({}),
   }).default({}),
   mcp: z.object({
     serverName: z.string().default('kiroku-memory'),

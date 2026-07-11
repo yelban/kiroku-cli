@@ -5,7 +5,7 @@ import { isVecEnabled } from '../shared/db.js';
 import { writeAudit } from '../shared/audit.js';
 import { loadConfig } from '../shared/config.js';
 import { planMoveOperation } from './move-planner.js';
-import { normalizeSupersedeConfig, resolveSemanticSupersedes } from './supersede-resolver.js';
+import { normalizeSupersedeConfig, resolveSemanticSupersedes, SINGLE_VALUED_FACT_TYPES } from './supersede-resolver.js';
 
 const log = createLogger('store');
 const MEMORY_OPERATION_ACTIONS = Object.freeze({
@@ -149,18 +149,23 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
       }
     }
 
-    // Check for existing active fact with same subject+predicate+scope → supersede
+    // Exact same-subject+predicate supersede — single-valued types only. A
+    // preference/state/task predicate holds one current value; a semantic
+    // predicate may hold several complementary objects at once (depends on,
+    // requires env var), so its mutation must come from operation/cue paths.
+    let exactSupersede = null;
     if (subjectEntityId && !isMemoryOperation) {
-      const existing = d.prepare(
-        `SELECT id FROM facts WHERE project_id = ? AND subject_entity_id = ? AND predicate = ? AND scope = ? AND status = 'active'`
-      ).get(projectId, subjectEntityId, fact.predicate, scope);
+      const newFactType = fact.fact_type || 'semantic';
+      if (SINGLE_VALUED_FACT_TYPES.has(newFactType)) {
+        const existing = d.prepare(
+          `SELECT id FROM facts WHERE project_id = ? AND subject_entity_id = ? AND predicate = ? AND scope = ? AND status = 'active'`
+        ).get(projectId, subjectEntityId, fact.predicate, scope);
 
-      if (existing) {
-        d.prepare(`UPDATE facts SET status = 'superseded', updated_at = ? WHERE id = ?`).run(now, existing.id);
-        if (isVecEnabled()) {
-          try {
-            d.prepare(`UPDATE fact_embeddings SET status = 'superseded' WHERE fact_id = ?`).run(existing.id);
-          } catch { /* embedding may not exist yet */ }
+        if (existing) {
+          const status = newFactType === 'preference' ? 'superseded' : 'archived';
+          applyFactStatus(d, existing.id, status, now);
+          syncFactEmbeddingStatus(d, existing.id, status);
+          exactSupersede = { targetId: existing.id, status, factType: newFactType };
         }
       }
     }
@@ -172,6 +177,15 @@ export function storeFacts(facts, entityMap, projectId, sourceTurnId, licenseSta
         0.7, now, 0);
 
     writeAudit(d, { projectId, action: 'extract', targetType: 'fact', targetId: fid, detail: { subject: fact.subject, predicate: fact.predicate } });
+    if (exactSupersede) {
+      writeAudit(d, {
+        projectId,
+        action: 'exact_supersede',
+        targetType: 'fact',
+        targetId: exactSupersede.targetId,
+        detail: { action: exactSupersede.status, sourceFactId: fid, predicate: fact.predicate, factType: exactSupersede.factType },
+      });
+    }
     insertedFactIds.add(fid);
     if (isMemoryOperation && !isVecEnabled()) {
       const config = getSupersedeConfig();
@@ -1051,14 +1065,23 @@ export async function runCompactionSweep(db, opts = {}, decayConfig = {}) {
           // Phase 3: Conflict detection — related but not duplicate
           if (facts[i].predicate === facts[j].predicate &&
               facts[i].object_text !== facts[j].object_text) {
+            // Same predicate + different object is only a contradiction for
+            // single-valued types; semantic multi-valued groups (several env
+            // vars, several dependencies) are complementary — observe, don't
+            // demote, or the group evaporates one sweep at a time.
+            const bothSingleValued = SINGLE_VALUED_FACT_TYPES.has(facts[i].fact_type)
+              && SINGLE_VALUED_FACT_TYPES.has(facts[j].fact_type);
             log.warn({
               factA: facts[i].id, factB: facts[j].id,
               predicate: facts[i].predicate,
               objectA: facts[i].object_text, objectB: facts[j].object_text,
               cosine: cosine.toFixed(3),
+              demoted: bothSingleValued,
             }, 'potential fact conflict detected');
-            demoteConflictFacts(db, facts[i], facts[j], cosine, floorByType, now);
-            conflicts++;
+            if (bothSingleValued) {
+              demoteConflictFacts(db, facts[i], facts[j], cosine, floorByType, now);
+              conflicts++;
+            }
           }
         }
       }

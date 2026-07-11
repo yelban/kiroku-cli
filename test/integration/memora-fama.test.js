@@ -74,6 +74,7 @@ const { selectProjectBriefRows } = await import('../../src/mcp/project-brief.js'
 const { sqlReadonly } = await import('../../src/mcp/sql-sandbox.js');
 const { runRepoGroundingSweep } = await import('../../src/worker/repo-grounding.js');
 const {
+  runCompactionSweep,
   runDecaySweep,
   setDb,
   storeEmbeddings,
@@ -113,7 +114,11 @@ const V1_BASELINE_FAMA_FLOOR = 1.0;
 // Measured M4-1 baseline (G9/A1/G13 unimplemented): MPA 0.818182, FAA 0.545455, FAMA 0.666667.
 // M4-2 memory_about (G9) baseline: FAMA 0.666667 -> 0.774155 (MPA 0.913043, FAA 0.615385).
 // A1-2 repo grounding baseline: FAMA 0.774155 -> 0.92 (MPA 0.92, FAA 1.0); question 18 (G13) is the last red.
-const M4_BASELINE_FAMA_FLOOR = 0.92;
+// G13 single-valued gate baseline: FAMA 0.92 -> 1.0 — the M4 booklet is now
+// SATURATED (all 20 questions green, zero test.fails). Do not read 1.0 as
+// memory quality being complete; the next improvement round must open by
+// expanding the exam again.
+const M4_BASELINE_FAMA_FLOOR = 1.0;
 
 // Behavior-metric baselines (AutoMem Figure 4 analogues). Deterministic under
 // the fixture workload; both change whenever the question set changes — update
@@ -446,7 +451,9 @@ function writeScore(score) {
 
 describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-vec', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    // Fake only Date: runCompactionSweep yields via setImmediate, which a
+    // full fake-timer install would capture and never resolve.
+    vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(NOW_ISO));
     loggerMock.debug.mockClear();
     loggerMock.warn.mockClear();
@@ -1254,24 +1261,31 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     });
   });
 
-  test.fails('18 multi-valued predicate facts coexist and are fully retrievable (G13/G9)', async () => {
+  test('18 multi-valued predicate facts coexist and are fully retrievable (G13/G9)', async () => {
     await evaluateQuestion({
       id: '18',
       title: 'multi-valued predicate completeness',
       booklet: 'm4',
-      expected: 'fail',
+      expected: 'pass',
     }, async ({ criterion }) => {
       const envVars = ['DEPLOY_KEY', 'DEPLOY_REGION', 'DEPLOY_BUCKET', 'DEPLOY_ROLE', 'DEPLOY_TIMEOUT', 'DEPLOY_CHANNEL'];
+      // Pairwise cosine pinned at 0.85 — inside the compaction conflict band
+      // (0.75–0.92), deliberately below the >0.92 merge band, which has its
+      // own open question for multi-valued groups (see gap analysis).
       const factIds = envVars.map((name, i) => addFact({
         subject: 'DeployPipeline',
         predicate: 'requires env var',
         object: `${name} set`,
-        embedding: basis(50),
+        embedding: vector([[50, Math.sqrt(0.85)], [51 + i, Math.sqrt(0.15)]]),
         createdAt: `2026-02-${String(i + 1).padStart(2, '0')}T09:00:00.000Z`,
       }));
 
       const statuses = factIds.map(id => dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(id).status);
       criterion('appear', 'complementary same-predicate facts all stay active (no false supersede)', statuses.every(status => status === 'active'), statuses);
+
+      await runCompactionSweep(dbState.db, {}, QUARTERLY_DECAY_CONFIG.worker.decay);
+      const afterCompaction = factIds.map(id => dbState.db.prepare('SELECT status, heat FROM facts WHERE id = ?').get(id));
+      criterion('appear', 'compaction leaves the complementary group active and undemoted', afterCompaction.every(row => row.status === 'active' && row.heat >= 0.699), afterCompaction);
 
       const about = await loadMemoryAbout();
       if (!about) {

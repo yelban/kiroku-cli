@@ -160,19 +160,21 @@ describe('runCompactionSweep conflict demotion', () => {
   it('demotes both conflicting facts by half and writes one audit per fact', async () => {
     const firstId = seedFact(db, {
       object: 'SQLite',
+      factType: 'state',
       heat: 0.8,
       baseHeat: 0.6,
       embedding: basis(0),
     });
     const secondId = seedFact(db, {
       object: 'Postgres',
+      factType: 'state',
       heat: 0.7,
       baseHeat: 0.5,
       embedding: vectorWithCosine(0.8),
     });
 
     await expect(runCompactionSweep(db, {}, {
-      floorByType: { semantic: 0.3 },
+      floorByType: { state: 0.3 },
     })).resolves.toEqual({ merged: 0, conflicts: 1 });
 
     expect(readFact(db, firstId)).toMatchObject({ status: 'active', heat: 0.4, base_heat: 0.3 });
@@ -235,12 +237,14 @@ describe('runCompactionSweep conflict demotion', () => {
   it('uses a zero floor when no decay config is passed', async () => {
     const firstId = seedFact(db, {
       object: 'LevelDB',
+      factType: 'state',
       heat: 0.1,
       baseHeat: 0.08,
       embedding: basis(0),
     });
     const secondId = seedFact(db, {
       object: 'RocksDB',
+      factType: 'state',
       heat: 0.09,
       baseHeat: 0.06,
       embedding: vectorWithCosine(0.8),
@@ -250,6 +254,29 @@ describe('runCompactionSweep conflict demotion', () => {
 
     expect(readFact(db, firstId)).toMatchObject({ heat: 0.05, base_heat: 0.04 });
     expect(readFact(db, secondId)).toMatchObject({ heat: 0.045, base_heat: 0.03 });
+  });
+
+  it('leaves semantic multi-valued same-predicate facts undemoted (G13)', async () => {
+    const firstId = seedFact(db, {
+      object: 'DEPLOY_KEY set',
+      heat: 0.7,
+      baseHeat: 0.7,
+      embedding: basis(0),
+    });
+    const secondId = seedFact(db, {
+      object: 'DEPLOY_REGION set',
+      heat: 0.7,
+      baseHeat: 0.7,
+      embedding: vectorWithCosine(0.8),
+    });
+
+    await expect(runCompactionSweep(db, {}, {
+      floorByType: { semantic: 0.3 },
+    })).resolves.toEqual({ merged: 0, conflicts: 0 });
+
+    expect(readFact(db, firstId)).toMatchObject({ status: 'active', heat: 0.7 });
+    expect(readFact(db, secondId)).toMatchObject({ status: 'active', heat: 0.7 });
+    expect(readConflictAudits(db)).toHaveLength(0);
   });
 
   it('keeps the high-cosine merge path unchanged', async () => {

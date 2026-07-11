@@ -6,6 +6,11 @@ export const DEFAULT_SUPERSEDE_CONFIG = Object.freeze({
 });
 
 const STATE_TASK_TYPES = new Set(['state', 'task']);
+// Single-valued fact types: one current value per (subject, predicate), so a
+// same-predicate newcomer is a replacement. Semantic/episodic predicates may
+// hold several complementary objects at once (depends on, requires env var),
+// so predicate equality alone must never be a kill signal for them.
+export const SINGLE_VALUED_FACT_TYPES = Object.freeze(new Set(['preference', 'state', 'task']));
 const OPERATION_ACTIONS = Object.freeze({
   update: 'supersede',
   delete: 'archive',
@@ -176,8 +181,12 @@ function factTypeOf(fact) {
 }
 
 function hasReplacementSignal(candidate, target) {
-  if (STATE_TASK_TYPES.has(factTypeOf(target))) return true;
-  if (normalizePredicate(candidate?.predicate) === normalizePredicate(target?.predicate)) return true;
+  const targetType = factTypeOf(target);
+  if (STATE_TASK_TYPES.has(targetType)) return true;
+  if (targetType === 'preference'
+      && normalizePredicate(candidate?.predicate) === normalizePredicate(target?.predicate)) {
+    return true;
+  }
 
   const candidateText = `${candidate?.predicate ?? ''} ${objectTextOf(candidate)}`.toLowerCase();
   return REPLACEMENT_CUES.some(cue => candidateText.includes(cue));

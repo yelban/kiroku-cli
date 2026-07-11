@@ -13,6 +13,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Behavior metrics (AutoMem Figure 4 analogues) are now scored alongside FAMA: `emptySearchRate` and `dedupRate` are asserted against measured baselines (`0.066667`, `0.003731`); the supersede reason distribution and brief row/char cost are recorded in `test-results/memora-score.json` without assertions.
 - Measured M4 booklet baseline at M4-1 (G9/A1/G13 unimplemented): `MPA=0.818182`, `FAA=0.545455`, `FAMA=0.666667`.
 
+#### memory_about MCP Tool (M4-2, G9)
+- New `memory_about(subject)` tool returns ALL active facts about one entity, bypassing `memory_search`'s top-k cut and diversity filter — for summarizing, auditing, or reasoning across everything known about a topic. Results are grouped by fact_type with the same relative-age markers as the brief, capped at 200 facts.
+- Renamed entities resolve through `entities.aliases_json`: querying a retired name (e.g. the old path after a `move` operation chain) lands on the entity that now carries it as an alias, with the resolution noted in the output.
+- Exam questions 16/17 flipped from red to green. M4 booklet baseline: `FAMA 0.666667 -> 0.774155` (`MPA=0.913043`, `FAA=0.615385`); floor updated accordingly. Remaining red: 13/14 (A1), 18 (G13).
+
 #### Memory Operation Semantics (M3)
 - Extraction prompts now use a four-operation vocabulary: `add` (default new/complementary fact), `update` (new fact supersedes an older version), `delete` (target fact is archived), and `move` (same entity moved/renamed, carrying `{from,to}` identity).
 - `update` and `delete` reuse the semantic supersede resolver with relaxed operation gates; `delete` archives instead of superseding. Without embeddings, operation disposal falls back to exact same-subject matching.

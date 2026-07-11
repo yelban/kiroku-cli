@@ -109,7 +109,8 @@ const V1_BASELINE_FAMA_FLOOR = 1.0;
 // supersede in storeFacts assumes single-valued predicates; the semantic
 // resolver's same-predicate replacement signal shares the assumption).
 // Measured M4-1 baseline (G9/A1/G13 unimplemented): MPA 0.818182, FAA 0.545455, FAMA 0.666667.
-const M4_BASELINE_FAMA_FLOOR = 0.666667;
+// M4-2 memory_about (G9) baseline: FAMA 0.666667 -> 0.774155 (MPA 0.913043, FAA 0.615385).
+const M4_BASELINE_FAMA_FLOOR = 0.774155;
 
 // Behavior-metric baselines (AutoMem Figure 4 analogues). Deterministic under
 // the fixture workload; both change whenever the question set changes — update
@@ -1117,12 +1118,12 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     });
   });
 
-  test.fails('16 alias-aware full retrieval resolves a renamed entity (G9)', async () => {
+  test('16 alias-aware full retrieval resolves a renamed entity (G9)', async () => {
     await evaluateQuestion({
       id: '16',
       title: 'alias-aware full-subject retrieval',
       booklet: 'm4',
-      expected: 'fail',
+      expected: 'pass',
     }, async ({ criterion }) => {
       addFact({
         subject: 'src/old/telemetry.js',
@@ -1163,12 +1164,12 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
 
   // Category 4: full-subject completeness — G9 acceptance questions.
 
-  test.fails('17 full-subject retrieval is complete under mutation (G9)', async () => {
+  test('17 full-subject retrieval is complete under mutation (G9)', async () => {
     await evaluateQuestion({
       id: '17',
       title: 'full-subject completeness beyond top-k',
       booklet: 'm4',
-      expected: 'fail',
+      expected: 'pass',
     }, async ({ criterion }) => {
       const attributes = [
         ['listens on port', '8443'],

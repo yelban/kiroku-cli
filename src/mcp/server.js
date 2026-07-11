@@ -5,6 +5,7 @@ import { loadConfig } from '../shared/config.js';
 import { initDb, getDb, runMigrations } from '../shared/db.js';
 import { createLogger } from '../shared/logger.js';
 import { memorySearch } from './memory-search.js';
+import { memoryAbout } from './memory-about.js';
 import { memorySave, memoryForget } from './memory-write.js';
 import { sqlReadonly } from './sql-sandbox.js';
 import { healthStatus } from './health-status.js';
@@ -57,6 +58,29 @@ By default searches both project-scoped and global (cross-project) facts.`,
         return { content: [{ type: 'text', text: result }] };
       } catch (err) {
         log.error({ err: err.message }, 'memory_search error');
+        return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'memory_about',
+    `Retrieve ALL active facts about one entity (a file, module, service, tool, or topic). Use this tool INSTEAD OF memory_search whenever you need the complete picture rather than the closest matches:
+- Summarizing or auditing everything known about a topic
+- Reasoning or computing across multiple facts of the same subject (memory_search returns only the top-k similar and may drop items)
+- Listing all attributes, dependencies, or requirements of one entity
+
+Old names still work — renamed entities are resolved through their aliases.`,
+    {
+      subject: z.string().describe('Entity name (file path, module, service, or topic)'),
+      project_id: z.string().optional().describe('Project ID (defaults to current project)'),
+    },
+    async (params) => {
+      try {
+        const result = memoryAbout({ ...params, project_id: params.project_id || projectId });
+        return { content: [{ type: 'text', text: result }] };
+      } catch (err) {
+        log.error({ err: err.message }, 'memory_about error');
         return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
       }
     }

@@ -1402,10 +1402,10 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
       booklet: 'm5',
       expected: 'pass',
     }, async ({ criterion }) => {
-      // CACHE_PREFIX is deliberately absent: 'prefix' contains the cue 'fix'
-      // (REPLACEMENT_CUES matches substrings without word boundaries), which
-      // would supersede the group at insert time — recorded as candidate G15.
-      const envVars = ['CACHE_HOST', 'CACHE_PORT', 'CACHE_TTL', 'CACHE_REGION', 'CACHE_TLS', 'CACHE_POOL'];
+      // CACHE_PREFIX doubles as the G15 regression fixture: 'prefix' contains
+      // the cue 'fix', and pre-G15 substring matching superseded the earlier
+      // group members at insert time.
+      const envVars = ['CACHE_HOST', 'CACHE_PORT', 'CACHE_TTL', 'CACHE_PREFIX', 'CACHE_TLS', 'CACHE_POOL'];
       // Pairwise cosine pinned at 0.95 — INSIDE the >0.92 merge band, where
       // question 18 deliberately stayed below. Complementary objects must not
       // be treated as paraphrase duplicates.

@@ -246,6 +246,45 @@ describe('resolveSemanticSupersedes', () => {
     })]);
   });
 
+  it('ignores words that merely contain a cue (G15: no substring false fire)', () => {
+    const decisions = resolveSemanticSupersedes({
+      ...candidateBase,
+      predicate: 'requires env var',
+      objectText: 'CACHE_PREFIX set', // 'prefix' contains 'fix'
+      embedding: [1, 0],
+    }, [{
+      ...targetBase,
+      predicate: 'requires env var',
+      objectText: 'CACHE_HOST set',
+      embedding: vectorWithCosine(0.95),
+    }], {
+      semanticThreshold: 0.58,
+      stateTaskThreshold: 0.8,
+    });
+
+    expect(decisions).toEqual([expect.objectContaining({
+      action: 'none',
+      reason: 'no_replacement_signal',
+    })]);
+  });
+
+  it('still fires on a word-boundary cue, including sentence-final now', () => {
+    const decisions = resolveSemanticSupersedes({
+      ...candidateBase,
+      predicate: 'is the storage engine now',
+      objectText: 'SQLite',
+      embedding: [1, 0],
+    }, [targetBase], {
+      semanticThreshold: 0.58,
+      stateTaskThreshold: 0.8,
+    });
+
+    expect(decisions).toEqual([expect.objectContaining({
+      action: 'supersede',
+      targetFactId: 'fact_old',
+    })]);
+  });
+
   it('does not kill complementary same-subject semantic facts without replacement cues', () => {
     const decisions = resolveSemanticSupersedes({
       ...candidateBase,

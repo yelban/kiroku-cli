@@ -15,41 +15,17 @@ const OPERATION_ACTIONS = Object.freeze({
   update: 'supersede',
   delete: 'archive',
 });
-const REPLACEMENT_CUES = [
-  'standardize',
-  'standardizes',
-  'standardized',
-  'fix',
-  'fixes',
-  'fixed',
-  'resolve',
-  'resolves',
-  'resolved',
-  'replace',
-  'replaces',
-  'replaced',
-  'switch',
-  'switches',
-  'switched',
-  'migrate',
-  'migrates',
-  'migrated',
-  'move',
-  'moves',
-  'moved',
-  'remove',
-  'removes',
-  'removed',
-  'drop',
-  'drops',
-  'dropped',
-  'deprecate',
-  'deprecates',
-  'deprecated',
-  'no longer',
-  'now ',
-  // CJK replacement cues — kiroku's primary conversation language is zh-TW;
-  // substring matching needs no word segmentation.
+// English cues require word boundaries: bare substring matching falsely fires
+// on words that merely contain a cue ('prefix' contains 'fix', 'resolver'
+// contains 'resolve') and kills unrelated same-subject facts at insert time
+// (G15). Covers the base verb plus -s/-es/-ed/-ped inflections.
+const EN_REPLACEMENT_CUE_RE = new RegExp(
+  '\\b(?:standardize[sd]?|fix(?:es|ed)?|resolve[sd]?|replace[sd]?|switch(?:es|ed)?'
+  + '|migrate[sd]?|move[sd]?|remove[sd]?|drop(?:s|ped)?|deprecate[sd]?|no longer|now)\\b',
+);
+// CJK replacement cues — kiroku's primary conversation language is zh-TW;
+// CJK has no word boundaries, so substring matching stands.
+const CJK_REPLACEMENT_CUES = [
   '改用',
   '換成',
   '換用',
@@ -189,7 +165,8 @@ function hasReplacementSignal(candidate, target) {
   }
 
   const candidateText = `${candidate?.predicate ?? ''} ${objectTextOf(candidate)}`.toLowerCase();
-  return REPLACEMENT_CUES.some(cue => candidateText.includes(cue));
+  return EN_REPLACEMENT_CUE_RE.test(candidateText)
+    || CJK_REPLACEMENT_CUES.some(cue => candidateText.includes(cue));
 }
 
 function normalizePredicate(predicate = '') {

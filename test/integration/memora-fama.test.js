@@ -114,17 +114,23 @@ const V1_BASELINE_FAMA_FLOOR = 1.0;
 // Measured M4-1 baseline (G9/A1/G13 unimplemented): MPA 0.818182, FAA 0.545455, FAMA 0.666667.
 // M4-2 memory_about (G9) baseline: FAMA 0.666667 -> 0.774155 (MPA 0.913043, FAA 0.615385).
 // A1-2 repo grounding baseline: FAMA 0.774155 -> 0.92 (MPA 0.92, FAA 1.0); question 18 (G13) is the last red.
-// G13 single-valued gate baseline: FAMA 0.92 -> 1.0 — the M4 booklet is now
-// SATURATED (all 20 questions green, zero test.fails). Do not read 1.0 as
-// memory quality being complete; the next improvement round must open by
-// expanding the exam again.
+// G13 single-valued gate baseline: FAMA 0.92 -> 1.0 — saturated; held as the
+// second regression asset alongside the v1 booklet.
 const M4_BASELINE_FAMA_FLOOR = 1.0;
+
+// M5 booklet (questions 21-26). Red questions price the open gaps:
+// 21 -> G14 compaction merge band (fixed in the same commit — pre-fix
+// baseline recorded in the CHANGELOG), 22 -> G4 supersede chain/timeline,
+// 23 -> G8 preference immortalization, 24 -> G12 brief type quotas.
+// Measured M5 baseline pre-G14 fix: MPA 0.6, FAA 0.666667, FAMA 0.544444.
+// Post-G14 fix: FAMA 0.544444 -> 0.677778 (MPA 0.733333, FAA 0.666667).
+const M5_BASELINE_FAMA_FLOOR = 0.677778;
 
 // Behavior-metric baselines (AutoMem Figure 4 analogues). Deterministic under
 // the fixture workload; both change whenever the question set changes — update
 // consciously alongside the floors above.
-const EMPTY_SEARCH_RATE_BASELINE = 0.066667; // 1 cold-start empty search / 15 searches
-const DEDUP_RATE_BASELINE = 0.003731;        // 1 deliberate repeat-write / 268 write attempts
+const EMPTY_SEARCH_RATE_BASELINE = 0.0625;   // 1 cold-start empty search / 16 searches
+const DEDUP_RATE_BASELINE = 0.003378;        // 1 deliberate repeat-write / 296 write attempts
 
 function createMemoraDb() {
   const db = new Database(':memory:');
@@ -445,7 +451,8 @@ function writeScore(score) {
   mkdirSync(dirname(SCORE_PATH), { recursive: true });
   writeFileSync(SCORE_PATH, `${JSON.stringify(score, null, 2)}\n`);
   const fmt = s => `MPA=${s.mpa} FAA=${s.faa} FAMA=${s.fama}`;
-  console.info(`[memora-fama] v1: ${fmt(score.booklets.v1)} | m4: ${fmt(score.booklets.m4)} | overall: ${fmt(score.overall)}`);
+  const bookletLine = Object.entries(score.booklets).map(([name, s]) => `${name}: ${fmt(s)}`).join(' | ');
+  console.info(`[memora-fama] ${bookletLine} | overall: ${fmt(score.overall)}`);
   console.info(`[memora-fama] behavior: emptySearchRate=${score.behavior.emptySearchRate} dedupRate=${score.behavior.dedupRate} supersede=${JSON.stringify(score.behavior.supersedeReasons)}`);
 }
 
@@ -490,13 +497,16 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
   afterAll(() => {
     const v1Questions = scoreState.questions.filter(question => question.booklet === 'v1');
     const m4Questions = scoreState.questions.filter(question => question.booklet === 'm4');
+    const m5Questions = scoreState.questions.filter(question => question.booklet === 'm5');
     expect(v1Questions).toHaveLength(9);
     expect(m4Questions).toHaveLength(11);
+    expect(m5Questions).toHaveLength(6);
 
     const score = {
       booklets: {
         v1: computeScore(v1Questions),
         m4: computeScore(m4Questions),
+        m5: computeScore(m5Questions),
       },
       overall: computeScore(scoreState.questions),
       behavior: computeBehavior(),
@@ -505,6 +515,7 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
 
     expect(score.booklets.v1.fama).toBeGreaterThanOrEqual(V1_BASELINE_FAMA_FLOOR);
     expect(score.booklets.m4.fama).toBeGreaterThanOrEqual(M4_BASELINE_FAMA_FLOOR);
+    expect(score.booklets.m5.fama).toBeGreaterThanOrEqual(M5_BASELINE_FAMA_FLOOR);
     expect(score.behavior.emptySearchRate).toBe(EMPTY_SEARCH_RATE_BASELINE);
     expect(score.behavior.dedupRate).toBe(DEDUP_RATE_BASELINE);
   });
@@ -1379,6 +1390,271 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
       }, { maxRows: 10 });
       criterion('appear', 'SQL over active facts sees the updated value', table.includes('| 800 |'), table);
       criterion('forget', 'SQL over active facts excludes the superseded value', !table.includes('| 500 |'), table);
+    });
+  });
+
+  // ── M5 booklet ──────────────────────────────────────────────────────────
+
+  test('21 near-identical multi-valued facts survive the compaction merge band (G14)', async () => {
+    await evaluateQuestion({
+      id: '21',
+      title: 'merge band vs multi-valued group',
+      booklet: 'm5',
+      expected: 'pass',
+    }, async ({ criterion }) => {
+      // CACHE_PREFIX is deliberately absent: 'prefix' contains the cue 'fix'
+      // (REPLACEMENT_CUES matches substrings without word boundaries), which
+      // would supersede the group at insert time — recorded as candidate G15.
+      const envVars = ['CACHE_HOST', 'CACHE_PORT', 'CACHE_TTL', 'CACHE_REGION', 'CACHE_TLS', 'CACHE_POOL'];
+      // Pairwise cosine pinned at 0.95 — INSIDE the >0.92 merge band, where
+      // question 18 deliberately stayed below. Complementary objects must not
+      // be treated as paraphrase duplicates.
+      const factIds = envVars.map((name, i) => addFact({
+        subject: 'CacheLayer',
+        predicate: 'requires env var',
+        object: `${name} set`,
+        embedding: vector([[55, Math.sqrt(0.95)], [56 + i, Math.sqrt(0.05)]]),
+        createdAt: `2026-02-${String(i + 1).padStart(2, '0')}T09:00:00.000Z`,
+      }));
+
+      await runCompactionSweep(dbState.db, {}, QUARTERLY_DECAY_CONFIG.worker.decay);
+
+      const rows = factIds.map(id => dbState.db.prepare('SELECT status, heat FROM facts WHERE id = ?').get(id));
+      criterion('appear', 'no member of the group is compacted as a duplicate', rows.every(row => row.status === 'active'), rows);
+      criterion('appear', 'the group stays undemoted', rows.every(row => row.heat >= 0.699), rows);
+
+      const about = await loadMemoryAbout();
+      const aboutRows = about ? about.selectMemoryAboutRows(dbState.db, { subject: 'CacheLayer', projectId: PROJECT_ID }) : [];
+      criterion('appear', 'full-subject mode returns the whole group', envVars.every(name => aboutRows.some(row => row.object_text === `${name} set`)), aboutRows.map(row => row.object_text));
+    });
+  });
+
+  test.fails('22 a superseded preference chain is reconstructable (G4)', async () => {
+    await evaluateQuestion({
+      id: '22',
+      title: 'supersede chain timeline',
+      booklet: 'm5',
+      expected: 'fail',
+    }, async ({ criterion }) => {
+      const npmId = addFact({
+        subject: 'User',
+        predicate: 'prefers package manager',
+        object: 'npm',
+        factType: 'preference',
+        scope: 'global',
+        createdAt: '2026-01-05T09:00:00.000Z',
+      });
+      const pnpmId = addFact({
+        subject: 'User',
+        predicate: 'prefers package manager',
+        object: 'pnpm',
+        factType: 'preference',
+        scope: 'global',
+        createdAt: '2026-02-05T09:00:00.000Z',
+      });
+      const bunId = addFact({
+        subject: 'User',
+        predicate: 'prefers package manager',
+        object: 'bun',
+        factType: 'preference',
+        scope: 'global',
+        createdAt: '2026-03-05T09:00:00.000Z',
+      });
+
+      const read = id => dbState.db.prepare('SELECT status, supersedes_fact_id, valid_to FROM facts WHERE id = ?').get(id);
+      const bun = read(bunId);
+      const pnpm = read(pnpmId);
+      const npm = read(npmId);
+
+      criterion('appear', 'the current fact links to the preference it replaced', bun.supersedes_fact_id === pnpmId, bun);
+      criterion('appear', 'the chain reaches the original preference', pnpm.supersedes_fact_id === npmId, pnpm);
+      criterion('appear', 'retired facts carry their validity end', pnpm.valid_to !== null && npm.valid_to !== null, { pnpm, npm });
+    });
+  });
+
+  test.fails('23 a stale preference stops outranking its replacement in the brief (G8)', async () => {
+    await evaluateQuestion({
+      id: '23',
+      title: 'preference immortalization feedback loop',
+      booklet: 'm5',
+      expected: 'fail',
+    }, async ({ criterion }) => {
+      // Old preference: repeatedly retrieved (access boost stacked its heat),
+      // never decays (preference half-life is null).
+      addFact({
+        subject: 'User',
+        predicate: 'prefers installing with',
+        object: 'npm',
+        factType: 'preference',
+        scope: 'global',
+        embedding: basis(60),
+        createdAt: '2026-01-05T09:00:00.000Z',
+        heat: 1.0,
+        baseHeat: 1.0,
+        accessCount: 20,
+      });
+      // New preference worded so differently that both mechanisms miss:
+      // cosine 0.5 sits below the semantic threshold (0.58) and the
+      // compaction conflict band (0.75); the predicate differs, so the
+      // exact path misses too.
+      addFact({
+        subject: 'User',
+        predicate: 'installs packages via',
+        object: 'bun --bun',
+        factType: 'preference',
+        scope: 'global',
+        embedding: pairedVector(60, 0.5),
+        createdAt: '2026-03-06T09:00:00.000Z',
+      });
+
+      await runDecaySweep(QUARTERLY_DECAY_CONFIG);
+      await runCompactionSweep(dbState.db, {}, QUARTERLY_DECAY_CONFIG.worker.decay);
+
+      const brief = briefRows({ maxFacts: 2 });
+      const newIndex = brief.findIndex(row => row.object_text === 'bun --bun');
+      const oldIndex = brief.findIndex(row => row.object_text === 'npm');
+      criterion('appear', 'the fresh preference reaches the brief', newIndex !== -1, brief.map(row => row.object_text));
+      criterion('forget', 'the stale preference no longer outranks its replacement', newIndex !== -1 && (oldIndex === -1 || newIndex < oldIndex), {
+        brief: brief.map(row => row.object_text),
+        newIndex,
+        oldIndex,
+      });
+    });
+  });
+
+  test.fails('24 high-heat project facts keep representation under a tight brief budget (G12)', async () => {
+    await evaluateQuestion({
+      id: '24',
+      title: 'brief type quotas',
+      booklet: 'm5',
+      expected: 'fail',
+    }, async ({ criterion }) => {
+      const prefs = [
+        ['prefers shell', 'zsh'],
+        ['prefers editor', 'helix'],
+        ['prefers terminal', 'ghostty'],
+        ['prefers vcs flow', 'trunk-based'],
+        ['prefers docs tone', 'terse'],
+      ];
+      prefs.forEach(([predicate, object], i) => addFact({
+        subject: 'User',
+        predicate,
+        object,
+        factType: 'preference',
+        scope: 'global',
+        createdAt: `2026-01-${String(i + 2).padStart(2, '0')}T09:00:00.000Z`,
+        heat: 1.0,
+        baseHeat: 1.0,
+      }));
+      for (let i = 0; i < 3; i++) {
+        addFact({
+          subject: 'ProjectCore',
+          predicate: `defines invariant ${i}`,
+          object: `write path guarantee ${i}`,
+          createdAt: '2026-03-06T09:00:00.000Z',
+          heat: 1.0,
+          baseHeat: 1.0,
+        });
+      }
+
+      const brief = briefRows({ maxFacts: 4 });
+      criterion('appear', 'a preference still leads the brief', brief[0]?.fact_type === 'preference', brief.map(row => `${row.fact_type}:${row.object_text}`));
+      criterion('appear', 'a high-heat project fact keeps representation under the tight budget', brief.some(row => row.fact_type === 'semantic'), brief.map(row => `${row.fact_type}:${row.object_text}`));
+    });
+  });
+
+  test('25 cross-entity numeric aggregation stays correct under mutation', async () => {
+    await evaluateQuestion({
+      id: '25',
+      title: 'cross-entity aggregation',
+      booklet: 'm5',
+      expected: 'pass',
+    }, async ({ criterion }) => {
+      const query = 'service monthly cost';
+      const queryVector = basis(65);
+      registerQueryVector(query, queryVector);
+
+      const services = [['AuthService', '120'], ['DataService', '80'], ['EdgeWorker', '200']];
+      services.forEach(([subject, object], i) => addFact({
+        subject,
+        predicate: 'monthly cost',
+        object,
+        embedding: queryVector,
+        createdAt: `2026-02-${String((i + 1) * 5).padStart(2, '0')}T09:00:00.000Z`,
+      }));
+      addFact({
+        subject: 'DataService',
+        predicate: 'monthly cost',
+        object: '95',
+        operation: 'update',
+        confidence: 0.9,
+        embedding: queryVector,
+        createdAt: '2026-03-05T09:00:00.000Z',
+      });
+
+      const rows = await searchRows(query, 5);
+      for (const value of ['120', '95', '200']) {
+        criterion('appear', `current cost ${value} is retrievable`, hasFact(rows, { object_text: value }), rows.map(row => `${row.subject} ${row.object_text}`));
+      }
+      criterion('forget', 'the superseded cost does not reappear in search', !hasFact(rows, { object_text: '80' }), rows.map(row => row.object_text));
+
+      const table = sqlReadonly({
+        sql: `SELECT SUM(CAST(object_text AS INTEGER)) AS total_cost FROM facts WHERE project_id = '${PROJECT_ID}' AND predicate = 'monthly cost' AND status = 'active'`,
+      }, { maxRows: 10 });
+      criterion('appear', 'cross-entity SQL aggregation lands on the mutated total', table.includes('| 415 |'), table);
+    });
+  });
+
+  test('26 memory_about resolves the oldest name across a three-hop rename chain', async () => {
+    await evaluateQuestion({
+      id: '26',
+      title: 'deep alias chain resolution',
+      booklet: 'm5',
+      expected: 'pass',
+    }, async ({ criterion }) => {
+      const originalId = addFact({
+        subject: 'src/v1/metrics.js',
+        predicate: 'contains',
+        object: 'metrics emitter',
+        embedding: basis(70),
+        createdAt: '2026-01-10T09:00:00.000Z',
+      });
+      const hops = [
+        ['src/v1/metrics.js', 'src/v2/metrics.js', '2026-01-25T09:00:00.000Z', 71],
+        ['src/v2/metrics.js', 'src/lib/metrics.js', '2026-02-15T09:00:00.000Z', 72],
+        ['src/lib/metrics.js', 'src/obs/metrics.js', '2026-03-01T09:00:00.000Z', 73],
+      ];
+      const moveIds = hops.map(([from, to, createdAt, axis]) => addFact({
+        subject: to,
+        predicate: 'now contains',
+        object: 'metrics emitter',
+        operation: 'move',
+        from,
+        to,
+        confidence: 0.9,
+        embedding: basis(axis),
+        createdAt,
+      }));
+      addFact({
+        subject: 'src/obs/metrics.js',
+        predicate: 'exports',
+        object: 'histogram helper',
+        embedding: basis(74),
+        createdAt: '2026-03-05T09:00:00.000Z',
+      });
+
+      const finalEntity = dbState.db.prepare("SELECT aliases_json FROM entities WHERE canonical_name = 'src/obs/metrics.js'").get();
+      const aliases = JSON.parse(finalEntity?.aliases_json || '[]');
+      criterion('appear', 'the final entity carries every prior name', ['src/v1/metrics.js', 'src/v2/metrics.js', 'src/lib/metrics.js'].every(name => aliases.includes(name)), aliases);
+
+      const about = await loadMemoryAbout();
+      const aboutRows = about ? about.selectMemoryAboutRows(dbState.db, { subject: 'src/v1/metrics.js', projectId: PROJECT_ID }) : [];
+      criterion('appear', 'the oldest name resolves to the current entity facts', aboutRows.some(row => row.object_text === 'histogram helper'), aboutRows.map(row => `${row.predicate} ${row.object_text}`));
+
+      const original = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(originalId);
+      const firstMove = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(moveIds[0]);
+      const secondMove = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(moveIds[1]);
+      criterion('forget', 'every superseded generation is retired', original.status !== 'active' && firstMove.status !== 'active' && secondMove.status !== 'active', { original, firstMove, secondMove });
     });
   });
 });

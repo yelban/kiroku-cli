@@ -1051,7 +1051,15 @@ export async function runCompactionSweep(db, opts = {}, decayConfig = {}) {
 
         const cosine = cosineSimilarity(embA, embB);
 
-        if (cosine > 0.92) {
+        // Same predicate + genuinely different object (normalized, so
+        // paraphrase spellings like "DuckDB"/"Duck DB" still count as one
+        // value) is never a paraphrase duplicate — route it to conflict
+        // handling even inside the >0.92 merge band, or a multi-valued group
+        // with near-identical embeddings gets compacted away (G14).
+        const conflictPattern = facts[i].predicate === facts[j].predicate
+          && normalizeName(facts[i].object_text) !== normalizeName(facts[j].object_text);
+
+        if (cosine > 0.92 && !conflictPattern) {
           // Archive lower-heat fact, boost survivor
           db.prepare(`UPDATE facts SET status = 'compacted', updated_at = ? WHERE id = ?`)
             .run(now, facts[j].id);
@@ -1061,27 +1069,24 @@ export async function runCompactionSweep(db, opts = {}, decayConfig = {}) {
             .run(facts[j].heat, facts[j].base_heat, now, facts[i].id);
           archived.add(facts[j].id);
           merged++;
-        } else if (cosine > 0.75) {
-          // Phase 3: Conflict detection — related but not duplicate
-          if (facts[i].predicate === facts[j].predicate &&
-              facts[i].object_text !== facts[j].object_text) {
-            // Same predicate + different object is only a contradiction for
-            // single-valued types; semantic multi-valued groups (several env
-            // vars, several dependencies) are complementary — observe, don't
-            // demote, or the group evaporates one sweep at a time.
-            const bothSingleValued = SINGLE_VALUED_FACT_TYPES.has(facts[i].fact_type)
-              && SINGLE_VALUED_FACT_TYPES.has(facts[j].fact_type);
-            log.warn({
-              factA: facts[i].id, factB: facts[j].id,
-              predicate: facts[i].predicate,
-              objectA: facts[i].object_text, objectB: facts[j].object_text,
-              cosine: cosine.toFixed(3),
-              demoted: bothSingleValued,
-            }, 'potential fact conflict detected');
-            if (bothSingleValued) {
-              demoteConflictFacts(db, facts[i], facts[j], cosine, floorByType, now);
-              conflicts++;
-            }
+        } else if (cosine > 0.75 && conflictPattern) {
+          // Phase 3: Conflict detection — related but not duplicate.
+          // Same predicate + different object is only a contradiction for
+          // single-valued types; semantic multi-valued groups (several env
+          // vars, several dependencies) are complementary — observe, don't
+          // demote, or the group evaporates one sweep at a time.
+          const bothSingleValued = SINGLE_VALUED_FACT_TYPES.has(facts[i].fact_type)
+            && SINGLE_VALUED_FACT_TYPES.has(facts[j].fact_type);
+          log.warn({
+            factA: facts[i].id, factB: facts[j].id,
+            predicate: facts[i].predicate,
+            objectA: facts[i].object_text, objectB: facts[j].object_text,
+            cosine: cosine.toFixed(3),
+            demoted: bothSingleValued,
+          }, 'potential fact conflict detected');
+          if (bothSingleValued) {
+            demoteConflictFacts(db, facts[i], facts[j], cosine, floorByType, now);
+            conflicts++;
           }
         }
       }

@@ -279,6 +279,52 @@ describe('runCompactionSweep conflict demotion', () => {
     expect(readConflictAudits(db)).toHaveLength(0);
   });
 
+  it('does not merge a same-predicate multi-valued pair even above the merge band (G14)', async () => {
+    const firstId = seedFact(db, {
+      object: 'CACHE_HOST set',
+      heat: 0.8,
+      baseHeat: 0.8,
+      embedding: basis(0),
+    });
+    const secondId = seedFact(db, {
+      object: 'CACHE_PORT set',
+      heat: 0.7,
+      baseHeat: 0.7,
+      embedding: vectorWithCosine(0.95),
+    });
+
+    await expect(runCompactionSweep(db, {}, {
+      floorByType: { semantic: 0.3 },
+    })).resolves.toEqual({ merged: 0, conflicts: 0 });
+
+    expect(readFact(db, firstId)).toMatchObject({ status: 'active', heat: 0.8 });
+    expect(readFact(db, secondId)).toMatchObject({ status: 'active', heat: 0.7 });
+  });
+
+  it('demotes a single-valued same-predicate pair above the merge band instead of merging it', async () => {
+    const firstId = seedFact(db, {
+      object: 'staging',
+      factType: 'state',
+      heat: 0.8,
+      baseHeat: 0.8,
+      embedding: basis(0),
+    });
+    const secondId = seedFact(db, {
+      object: 'production',
+      factType: 'state',
+      heat: 0.6,
+      baseHeat: 0.6,
+      embedding: vectorWithCosine(0.95),
+    });
+
+    await expect(runCompactionSweep(db, {}, {
+      floorByType: { state: 0.05 },
+    })).resolves.toEqual({ merged: 0, conflicts: 1 });
+
+    expect(readFact(db, firstId)).toMatchObject({ status: 'active', heat: 0.4 });
+    expect(readFact(db, secondId)).toMatchObject({ status: 'active', heat: 0.3 });
+  });
+
   it('keeps the high-cosine merge path unchanged', async () => {
     const survivorId = seedFact(db, {
       object: 'DuckDB',

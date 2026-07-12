@@ -28,3 +28,6 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+
+# A5 distillation survey — contains de-identified excerpts from private conversations; keep local
+docs/few-shot-distillation-survey.md

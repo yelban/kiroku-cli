@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### Brief Within-Type Ranking (G8)
+- `project_context` now ranks facts within each type by `hotWeight×heat + recencyWeight×recency` (defaults `0.65/0.35`, `halfLifeDays: 30`, recency from `created_at`) and **drops the access-count multiplier from the ordering**: `boostFactHeat` already folds retrieval hits into `base_heat`, so multiplying by `access_count` again counted the same signal twice — the mechanical root of preference immortalization, where a stale, often-retrieved preference outranked its differently-worded replacement forever. Type priority and the G12 type floor are unchanged; preference decay semantics (never decays) are deliberately untouched.
+- Set `mcp.projectBrief.ranking.recencyWeight` to `0` to restore the legacy ordering wholesale, including the access multiplier.
+- Exam question 23 flipped from red to green. M5 booklet baseline: `FAMA 0.954545 -> 1.0` — **all 27 questions across three booklets are green; the exam is saturated for the third time**. The next improvement round must open by expanding it (M6); 1.0 must not be read as memory quality being complete.
+
 #### Secret Leak Defenses (G16)
 - Prompted by a survey of a legacy memory DB that found 26 facts carrying real API keys — one of them an active preference reinjected into every session via the brief. Defense in depth across four layers:
   - **DLP regex hardening**: the `openaiApiKey` rule's character class now includes `-`/`_`, so prefixed formats (`sk-proj-`, `sk-svcacct-`) match — the previous pattern let every `sk-proj-` key through. New rules: `githubFineGrainedPat` (`github_pat_…`), `privateKeyBlock` (PEM), `jwt`.

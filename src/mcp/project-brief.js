@@ -95,6 +95,12 @@ export function selectProjectBriefRows(db, projectId, config) {
 
   if (!candidates.length) return [];
 
+  // Within-type reranking (G8): heat + recency, WITHOUT the access
+  // multiplier — boostFactHeat already folds retrieval hits into base_heat,
+  // so multiplying by access_count again counted the same signal twice and
+  // let a stale, often-retrieved preference outrank its replacement forever.
+  rankBriefCandidates(candidates, resolveBriefRanking(config));
+
   const selected = [];
   let tokenCount = 0;
   let budgetExhausted = false;
@@ -141,6 +147,49 @@ export function selectProjectBriefRows(db, projectId, config) {
   const rank = new Map(candidates.map((row, index) => [row, index]));
   selected.sort((a, b) => rank.get(a) - rank.get(b));
   return selected;
+}
+
+const BRIEF_TYPE_ORDER = { preference: 0, semantic: 1, task: 2, state: 3, episodic: 4 };
+const BRIEF_DEFAULT_RANKING = { hotWeight: 0.65, recencyWeight: 0.35, halfLifeDays: 30 };
+
+function resolveBriefRanking(config) {
+  const ranking = (config && typeof config === 'object' ? config.ranking : null) || {};
+  return {
+    hotWeight: Number.isFinite(Number(ranking.hotWeight)) ? Number(ranking.hotWeight) : BRIEF_DEFAULT_RANKING.hotWeight,
+    recencyWeight: Number.isFinite(Number(ranking.recencyWeight)) ? Number(ranking.recencyWeight) : BRIEF_DEFAULT_RANKING.recencyWeight,
+    halfLifeDays: Number(ranking.halfLifeDays) > 0 ? Number(ranking.halfLifeDays) : BRIEF_DEFAULT_RANKING.halfLifeDays,
+  };
+}
+
+// In-place stable rerank: type priority stays the outer key; within a type,
+// hotWeight×heat + recencyWeight×recency. recencyWeight 0 restores the legacy
+// ordering wholesale — the SQL coarse order (heat × access multiplier) is
+// kept untouched, which is the one-knob escape hatch.
+function rankBriefCandidates(candidates, ranking) {
+  if (!(ranking.recencyWeight > 0)) return candidates;
+  const nowMs = Date.now();
+  const scored = candidates.map((row, index) => ({
+    row,
+    index,
+    score: ranking.hotWeight * Math.min(Math.max(row.heat ?? 0, 0), 1)
+      + ranking.recencyWeight * briefRecency(row.created_at, ranking.halfLifeDays, nowMs),
+  }));
+  scored.sort((a, b) => {
+    const byType = (BRIEF_TYPE_ORDER[a.row.fact_type] ?? 5) - (BRIEF_TYPE_ORDER[b.row.fact_type] ?? 5);
+    if (byType !== 0) return byType;
+    return (b.score - a.score) || (a.index - b.index);
+  });
+  candidates.length = 0;
+  for (const item of scored) candidates.push(item.row);
+  return candidates;
+}
+
+function briefRecency(createdAt, halfLifeDays, nowMs) {
+  // created_at, not updated_at: decay sweeps rewrite updated_at every 6h.
+  const createdMs = Date.parse(createdAt);
+  if (!Number.isFinite(createdMs)) return 0;
+  const ageDays = Math.max(0, (nowMs - createdMs) / MS_PER_DAY);
+  return Math.pow(0.5, ageDays / halfLifeDays);
 }
 
 export function renderProjectBriefRows(rows) {

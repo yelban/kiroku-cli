@@ -130,7 +130,11 @@ const M4_BASELINE_FAMA_FLOOR = 1.0;
 // G12 brief type-floor baseline: FAMA 0.877778 -> 0.944444 (MPA 1.0);
 // the last red is question 23 (G8 preference immortalization).
 // G16 secret output floor added question 27 (green on arrival): 0.944444 -> 0.954545.
-const M5_BASELINE_FAMA_FLOOR = 0.954545;
+// G8 brief within-type ranking baseline: 0.954545 -> 1.0 — the M5 booklet is
+// SATURATED (all 27 questions across three booklets green, zero test.fails).
+// Do not read 1.0 as memory quality being complete; the next improvement
+// round must open by expanding the exam (M6).
+const M5_BASELINE_FAMA_FLOOR = 1.0;
 
 // Behavior-metric baselines (AutoMem Figure 4 analogues). Deterministic under
 // the fixture workload; both change whenever the question set changes — update
@@ -1482,12 +1486,12 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     });
   });
 
-  test.fails('23 a stale preference stops outranking its replacement in the brief (G8)', async () => {
+  test('23 a stale preference stops outranking its replacement in the brief (G8)', async () => {
     await evaluateQuestion({
       id: '23',
       title: 'preference immortalization feedback loop',
       booklet: 'm5',
-      expected: 'fail',
+      expected: 'pass',
     }, async ({ criterion }) => {
       // Old preference: repeatedly retrieved (access boost stacked its heat),
       // never decays (preference half-life is null).

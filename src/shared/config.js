@@ -137,6 +137,11 @@ const ConfigSchema = z.object({
       maxFacts: z.number().default(50),
       maxTokens: z.number().default(4000), // 0 = unlimited
       minPerType: z.number().default(1),   // type-floor seats per represented fact_type; 0 = legacy absolute priority
+      ranking: z.object({
+        hotWeight: z.number().default(0.65),
+        recencyWeight: z.number().default(0.35), // 0 = legacy ordering (heat × access multiplier)
+        halfLifeDays: z.number().default(30),
+      }).default({}),
     }).default({}),
     search: z.object({
       ranking: z.object({

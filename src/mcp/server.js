@@ -7,6 +7,7 @@ import { createLogger } from '../shared/logger.js';
 import { memorySearch } from './memory-search.js';
 import { memoryAbout } from './memory-about.js';
 import { memorySave, memoryForget } from './memory-write.js';
+import { memoryFeedback } from './memory-feedback.js';
 import { sqlReadonly } from './sql-sandbox.js';
 import { healthStatus } from './health-status.js';
 import { getProjectBrief } from './project-brief.js';
@@ -157,6 +158,33 @@ Old names still work — renamed entities are resolved through their aliases.`,
         return { content: [{ type: 'text', text: result }] };
       } catch (err) {
         log.error({ err: err.message }, 'memory_forget error');
+        return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'memory_feedback',
+    `Correct memory against live evidence. Use ONLY in these two situations:
+- verdict='stale': something you just observed (code, repo state, command output) CONTRADICTS a remembered fact — the fact is demoted (recoverable), not deleted
+- verdict='confirmed': you just VERIFIED a remembered fact against the live system — refreshes its timestamp so it stops decaying
+
+Do NOT call this as a routine acknowledgement after memory_search; only act on actual verification or contradiction. To permanently remove a fact, use memory_forget instead.`,
+    {
+      verdict: z.enum(['stale', 'confirmed']).describe("'stale' (contradicted by live evidence) or 'confirmed' (verified against live system)"),
+      subject: z.string().optional().describe('Subject (fuzzy match)'),
+      predicate: z.string().optional().describe('Predicate (fuzzy match)'),
+      object: z.string().optional().describe('Object text (fuzzy match)'),
+      fact_id: z.string().optional().describe('Exact fact ID (if known)'),
+      reason: z.string().optional().describe('What you observed that led to this verdict'),
+      project_id: z.string().optional().describe('Project ID'),
+    },
+    async (params) => {
+      try {
+        const result = memoryFeedback({ ...params, project_id: params.project_id || projectId });
+        return { content: [{ type: 'text', text: result }] };
+      } catch (err) {
+        log.error({ err: err.message }, 'memory_feedback error');
         return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
       }
     }

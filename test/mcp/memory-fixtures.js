@@ -11,6 +11,8 @@ const MIGRATION_FILES = [
   '005_heat_decay.sql',
   '006_audit_log.sql',
   '007_v12_enhancements.sql',
+  '009_repo_grounding.sql',
+  '010_valid_from_backfill.sql',
 ];
 
 export function createMemoryTestDb() {

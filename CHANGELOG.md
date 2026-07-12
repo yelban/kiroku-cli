@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+#### memory_feedback MCP Tool (A5)
+- New `memory_feedback(verdict, …)` tool lets the agent correct memory against live evidence: `stale` (observed state contradicts a remembered fact) halves the fact's heat and base_heat down to its type floor — a recoverable demotion, not a deletion; `confirmed` (fact verified against the live system) refreshes `last_accessed_at` and clears `missing_since` without touching heat, so confirmation stops decay but never becomes another rich-get-richer channel.
+- Targets are located with the same fuzzy subject/predicate/object matching as `memory_forget` (tolerates the truncated values shown in search output), plus an optional exact `fact_id`; more than 5 matches refuses to apply and asks for narrower criteria. Every applied verdict writes a `feedback` audit row (verdict, reason, query) — the raw material for the future few-shot distillation loop.
+- The tool description restricts triggering to actual contradiction or verification (not routine acknowledgement of search results); permanent removal remains `memory_forget`'s job.
+
 ### Changed
 
 #### Brief Type Floor (G12)

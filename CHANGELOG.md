@@ -3,7 +3,9 @@
 All notable changes to Kiroku are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.8.1] - 2026-07-12
+
+Security-driven patch: defense-in-depth against secret leakage into memory (G16), shipped without waiting for the next minor. Rides along: brief type floor (G12), brief within-type ranking (G8), and the `memory_feedback` tool (A5). With G8, all 27 exam questions across three booklets are green (third saturation).
 
 ### Added
 

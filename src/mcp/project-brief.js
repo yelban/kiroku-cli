@@ -1,3 +1,5 @@
+import { redactSecrets } from '../shared/redact.js';
+
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const DAYS_PER_WEEK = 7;
 const DAYS_PER_MONTH = 30;
@@ -33,7 +35,7 @@ function formatLine(r) {
   const detail = r.object_detail ? ` — ${r.object_detail}` : '';
   const scope = r.scope === 'global' ? ' [global]' : '';
   const age = formatAgeMarker(r.created_at);
-  return `[${r.fact_type}] ${r.subject || '?'} ${r.predicate} ${r.object_text}${detail}${scope}${age}`;
+  return redactSecrets(`[${r.fact_type}] ${r.subject || '?'} ${r.predicate} ${r.object_text}${detail}${scope}${age}`);
 }
 
 function formatAgeMarker(createdAt) {

@@ -1,5 +1,6 @@
 import { getDb } from '../shared/db.js';
 import { createLogger } from '../shared/logger.js';
+import { redactSecrets } from '../shared/redact.js';
 
 const log = createLogger('memory-about');
 
@@ -112,7 +113,7 @@ export function renderMemoryAboutRows(rows, { subject, resolution, cap }) {
     for (const row of group) {
       const detail = row.object_detail ? ` — ${row.object_detail}` : '';
       const scope = row.scope === 'global' ? ' [global]' : '';
-      lines.push(`- ${row.predicate} ${row.object_text}${detail}${scope}${formatAgeMarker(row.created_at)}`);
+      lines.push(redactSecrets(`- ${row.predicate} ${row.object_text}${detail}${scope}${formatAgeMarker(row.created_at)}`));
     }
   }
 

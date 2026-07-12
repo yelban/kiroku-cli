@@ -1,6 +1,7 @@
 import { getDb } from '../shared/db.js';
 import { SQL_DENY_PATTERNS, SQL_ALLOWED_PREFIXES } from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
+import { redactSecrets } from '../shared/redact.js';
 
 const log = createLogger('sql-sandbox');
 
@@ -39,7 +40,8 @@ export function sqlReadonly(params, sandboxConfig) {
     const cells = cols.map(c => {
       let v = row[c];
       if (v == null) return 'NULL';
-      let s = String(v);
+      // Redact before truncating so a secret is never split into an unmatched fragment.
+      let s = redactSecrets(String(v));
       if (s.length > maxCellBytes) s = s.substring(0, maxCellBytes - 3) + '...';
       return s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
     });

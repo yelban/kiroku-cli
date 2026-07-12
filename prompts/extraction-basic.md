@@ -38,6 +38,7 @@ You are a knowledge extraction engine. Given a conversation turn, extract struct
 2. Predicates should be short verb phrases: "uses", "prefers", "decided to"
 3. Confidence: 1.0 for explicit, 0.7-0.9 for implied
 4. Skip trivial/generic facts, debug steps, and temporary values
+5. NEVER put secret values (API keys, tokens, passwords, private keys: `sk-...`, `ghp_...`, `github_pat_...`, `AKIA...`, `xox?-...`, `eyJ...`) into `object_text` or `object_detail` — record the practice ("authenticates with GitHub PAT (value withheld)"), never the value
 5. Maximum 10 facts per turn
 6. If no extractable knowledge, return empty arrays
 7. scope "global" for preferences/personal info; "project" for everything else

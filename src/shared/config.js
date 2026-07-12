@@ -15,7 +15,10 @@ const ConfigSchema = z.object({
         anthropicApiKey: true,
         openaiApiKey: true,
         githubPat: true,
+        githubFineGrainedPat: true,
         slackToken: true,
+        privateKeyBlock: true,
+        jwt: true,
       }),
     }).default({}),
     keepAlive: z.object({

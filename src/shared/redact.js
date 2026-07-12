@@ -26,3 +26,25 @@ export function redact(text) {
     rulesTriggered,
   };
 }
+
+// Unconditional secret scrub for memory OUTPUT surfaces (brief, search,
+// memory_about, sql_readonly cells). Unlike redact(), this ignores config —
+// the output floor has no escape hatch, because it is the only defense for
+// secrets that already made it into the store (G16).
+export function redactSecrets(text) {
+  if (typeof text !== 'string' || text.length === 0) return text;
+  let out = text;
+  for (const pattern of Object.values(DLP_RULES)) {
+    const re = new RegExp(pattern.source, pattern.flags);
+    out = out.replace(re, '[REDACTED]');
+  }
+  return out;
+}
+
+export function containsSecret(text) {
+  if (typeof text !== 'string' || text.length === 0) return false;
+  return Object.values(DLP_RULES).some(pattern => {
+    const re = new RegExp(pattern.source, pattern.flags);
+    return re.test(text);
+  });
+}

@@ -693,6 +693,28 @@ async function cmdDoctor() {
     console.log('  [OK] All facts have embeddings');
   }
 
+  // Memory hygiene: stored secrets predate the DLP output floor and should be
+  // removed at the source. Counts and ids only — never print the values.
+  if (db.status === 'ok' && db.facts > 0) {
+    try {
+      const { initDb: openDb, closeDb: closeDoctorDb } = await import('../src/shared/db.js');
+      const { containsSecret } = await import('../src/shared/redact.js');
+      const handle = await openDb();
+      const rows = handle.prepare(
+        `SELECT id, object_text, object_detail FROM facts WHERE status = 'active'`
+      ).all();
+      const tainted = rows.filter(r => containsSecret(r.object_text) || containsSecret(r.object_detail));
+      closeDoctorDb();
+      if (tainted.length > 0) {
+        console.log(`  [!!] ${tainted.length} active fact(s) contain secret-like values (redacted in all memory output)`);
+        console.log(`       Fact ids: ${tainted.slice(0, 10).map(r => r.id).join(', ')}${tainted.length > 10 ? ', …' : ''}`);
+        console.log('       Rotate the exposed credentials, then remove with memory_forget (fact_id) or sql cleanup.');
+      } else {
+        console.log('  [OK] No secret-like values in active facts');
+      }
+    } catch { /* hygiene scan is best-effort */ }
+  }
+
   const lic = health.components.license;
   if (lic.machine_id) console.log(`  Machine ID: ${lic.machine_id}`);
   if (lic.licensed) {

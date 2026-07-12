@@ -122,6 +122,7 @@ Default to `add` when uncertain. Do NOT mark hypotheticals, questions, proposals
 
 ## Do NOT Extract
 
+- **Secret values**: NEVER put API keys, tokens, passwords, or private keys (e.g. `sk-...`, `sk-ant-...`, `ghp_...`, `github_pat_...`, `AKIA...`, `xoxb-...`, JWT `eyJ...`, PEM blocks) into `object_text` or `object_detail`. Record the practice, never the value: `{"subject": "deploy script", "predicate": "authenticates with", "object": "GitHub PAT (value withheld)"}`.
 - **Debug noise**: stack traces, error messages, exception text — unless the user explicitly says "remember this error".
 - **Transient values**: variable values, intermediate computation results, exploratory output.
 - **Code dumps**: file contents, log output, command stdout/stderr — unless the user is declaring a permanent decision based on it.

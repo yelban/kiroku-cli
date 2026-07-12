@@ -70,8 +70,8 @@ vi.mock('../../src/worker/embedder.js', () => ({
 }));
 
 const sqliteVecProbe = await probeSqliteVec();
-const { selectMemorySearchRows } = await import('../../src/mcp/memory-search.js');
-const { selectProjectBriefRows } = await import('../../src/mcp/project-brief.js');
+const { selectMemorySearchRows, renderMemorySearchRows } = await import('../../src/mcp/memory-search.js');
+const { selectProjectBriefRows, renderProjectBriefRows } = await import('../../src/mcp/project-brief.js');
 const { sqlReadonly } = await import('../../src/mcp/sql-sandbox.js');
 const { runRepoGroundingSweep } = await import('../../src/worker/repo-grounding.js');
 const {
@@ -129,13 +129,14 @@ const M4_BASELINE_FAMA_FLOOR = 1.0;
 // G4 supersede chain baseline: FAMA 0.677778 -> 0.877778 (MPA 0.933333).
 // G12 brief type-floor baseline: FAMA 0.877778 -> 0.944444 (MPA 1.0);
 // the last red is question 23 (G8 preference immortalization).
-const M5_BASELINE_FAMA_FLOOR = 0.944444;
+// G16 secret output floor added question 27 (green on arrival): 0.944444 -> 0.954545.
+const M5_BASELINE_FAMA_FLOOR = 0.954545;
 
 // Behavior-metric baselines (AutoMem Figure 4 analogues). Deterministic under
 // the fixture workload; both change whenever the question set changes — update
 // consciously alongside the floors above.
-const EMPTY_SEARCH_RATE_BASELINE = 0.0625;   // 1 cold-start empty search / 16 searches
-const DEDUP_RATE_BASELINE = 0.003378;        // 1 deliberate repeat-write / 296 write attempts
+const EMPTY_SEARCH_RATE_BASELINE = 0.058824; // 1 cold-start empty search / 17 searches
+const DEDUP_RATE_BASELINE = 0.003356;        // 1 deliberate repeat-write / 298 write attempts
 
 function createMemoraDb() {
   const db = new Database(':memory:');
@@ -509,7 +510,7 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     const m5Questions = scoreState.questions.filter(question => question.booklet === 'm5');
     expect(v1Questions).toHaveLength(9);
     expect(m4Questions).toHaveLength(11);
-    expect(m5Questions).toHaveLength(6);
+    expect(m5Questions).toHaveLength(7);
 
     const score = {
       booklets: {
@@ -1664,6 +1665,47 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
       const firstMove = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(moveIds[0]);
       const secondMove = dbState.db.prepare('SELECT status FROM facts WHERE id = ?').get(moveIds[1]);
       criterion('forget', 'every superseded generation is retired', original.status !== 'active' && firstMove.status !== 'active' && secondMove.status !== 'active', { original, firstMove, secondMove });
+    });
+  });
+
+  test('27 stored secrets never leave memory surfaces in cleartext (G16)', async () => {
+    await evaluateQuestion({
+      id: '27',
+      title: 'secret output floor',
+      booklet: 'm5',
+      expected: 'pass',
+    }, async ({ criterion }) => {
+      // Synthetic key, not a real credential — shaped to trip the githubPat rule.
+      const syntheticKey = `ghp_${'A'.repeat(36)}`;
+      const query = 'deploy auth token';
+      const queryVector = basis(76);
+      registerQueryVector(query, queryVector);
+
+      addFact({
+        subject: 'DeployScript',
+        predicate: 'authenticates with token',
+        object: syntheticKey,
+        embedding: queryVector,
+        createdAt: '2026-03-01T09:00:00.000Z',
+        heat: 1.0,
+        baseHeat: 1.0,
+      });
+      addFact({
+        subject: 'DeployScript',
+        predicate: 'deploys via',
+        object: 'wrangler publish',
+        embedding: basis(77),
+        createdAt: '2026-03-02T09:00:00.000Z',
+      });
+
+      const rows = await searchRows(query, 5);
+      const table = renderMemorySearchRows(rows);
+      criterion('appear', 'the tainted fact itself stays retrievable', hasFact(rows, { subject: 'DeployScript' }), rows.map(row => row.subject));
+      criterion('forget', 'the secret value never appears in search output', !table.includes(syntheticKey), table.split('\n').slice(0, 4));
+      criterion('appear', 'the redaction marker is visible instead', table.includes('[REDACTED]'), table.split('\n').slice(0, 4));
+
+      const briefText = renderProjectBriefRows(briefRows({ maxFacts: 5 }));
+      criterion('forget', 'the secret value never appears in the brief', !briefText.includes(syntheticKey), briefText.split('\n').slice(0, 4));
     });
   });
 });

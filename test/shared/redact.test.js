@@ -11,14 +11,17 @@ vi.mock('../../src/shared/config.js', () => ({
           anthropicApiKey: true,
           openaiApiKey: true,
           githubPat: true,
+          githubFineGrainedPat: true,
           slackToken: true,
+          privateKeyBlock: true,
+          jwt: true,
         },
       },
     },
   }),
 }));
 
-const { redact } = await import('../../src/shared/redact.js');
+const { redact, redactSecrets, containsSecret } = await import('../../src/shared/redact.js');
 
 describe('redact', () => {
   // ── AWS Access Key ──
@@ -116,5 +119,43 @@ describe('redact', () => {
     expect(r.rulesTriggered).toContain('githubPat');
     expect(r.text).not.toContain(aws);
     expect(r.text).not.toContain(ghp);
+  });
+});
+
+describe('G16 additions', () => {
+  const projKey = `sk-proj-${'a1B2'.repeat(10)}`;
+  const finePat = `github_pat_${'X9'.repeat(15)}`;
+  const jwtToken = `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.${'s'.repeat(16)}`;
+  const pemBlock = '-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----';
+
+  it('redacts sk-proj- keys (the pre-G16 regex let them through)', () => {
+    const r = redact(`token ${projKey} in env`);
+    expect(r.text).not.toContain(projKey);
+    expect(r.rulesTriggered).toContain('openaiApiKey');
+  });
+
+  it('redacts fine-grained GitHub PATs', () => {
+    const r = redact(`use ${finePat} here`);
+    expect(r.text).not.toContain(finePat);
+    expect(r.rulesTriggered).toContain('githubFineGrainedPat');
+  });
+
+  it('redacts JWTs and PEM private key blocks', () => {
+    const r = redact(`jwt ${jwtToken} and\n${pemBlock}`);
+    expect(r.text).not.toContain(jwtToken);
+    expect(r.text).not.toContain('BEGIN RSA PRIVATE KEY');
+  });
+
+  it('redactSecrets scrubs unconditionally without config', () => {
+    const scrubbed = redactSecrets(`ghp_${'A'.repeat(36)} and ${projKey}`);
+    expect(scrubbed).not.toContain('ghp_A');
+    expect(scrubbed).not.toContain(projKey);
+    expect(scrubbed).toContain('[REDACTED]');
+    expect(redactSecrets('plain text stays')).toBe('plain text stays');
+  });
+
+  it('containsSecret detects without mutating', () => {
+    expect(containsSecret(`deploy with ghp_${'B'.repeat(36)}`)).toBe(true);
+    expect(containsSecret('uses GitHub PAT (value withheld)')).toBe(false);
   });
 });

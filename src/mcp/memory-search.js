@@ -3,8 +3,10 @@ import { loadConfig } from '../shared/config.js';
 import { createLogger } from '../shared/logger.js';
 import { boostFactHeat, setDb as storeSetDb } from '../worker/store.js';
 import { isDiverse } from './project-brief.js';
+import { redactSecrets } from '../shared/redact.js';
 
 const log = createLogger('memory-search');
+
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const TEXT_SEARCH_SIMILARITY = 1;
 const DEFAULT_SEARCH_RANKING = Object.freeze({
@@ -254,7 +256,8 @@ export function renderMemorySearchRows(rows, status = 'active') {
     ? `| Subject | Predicate | Object | Type | Scope | Status | Conf | Date |\n|---|---|---|---|---|---|---|---|\n`
     : `| Subject | Predicate | Object | Type | Scope | Conf | Date |\n|---|---|---|---|---|---|---|\n`;
   for (const r of rows) {
-    const s = trunc(r.subject || '?', 30), p = trunc(r.predicate, 25), o = trunc(r.object_text, 50);
+    // Redact before truncating so a secret is never split into an unmatched fragment.
+    const s = trunc(redactSecrets(r.subject || '?'), 30), p = trunc(redactSecrets(r.predicate), 25), o = trunc(redactSecrets(r.object_text), 50);
     const sc = r.scope || 'project';
     if (historical) {
       md += `| ${s} | ${p} | ${o} | ${r.fact_type} | ${sc} | ${trunc(statusText, 20)} | ${r.confidence} | ${(r.created_at || '').substring(0, 10)} |\n`;
@@ -266,7 +269,7 @@ export function renderMemorySearchRows(rows, status = 'active') {
   if (withDetail.length > 0) {
     md += '\n**Details:**\n';
     for (const r of withDetail) {
-      md += `- **${r.subject || '?'}** ${r.predicate}: ${r.object_detail}\n`;
+      md += redactSecrets(`- **${r.subject || '?'}** ${r.predicate}: ${r.object_detail}\n`);
     }
   }
   return md + `\n_${rows.length} results_`;

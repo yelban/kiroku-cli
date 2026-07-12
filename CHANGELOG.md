@@ -7,6 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+#### Secret Leak Defenses (G16)
+- Prompted by a survey of a legacy memory DB that found 26 facts carrying real API keys — one of them an active preference reinjected into every session via the brief. Defense in depth across four layers:
+  - **DLP regex hardening**: the `openaiApiKey` rule's character class now includes `-`/`_`, so prefixed formats (`sk-proj-`, `sk-svcacct-`) match — the previous pattern let every `sk-proj-` key through. New rules: `githubFineGrainedPat` (`github_pat_…`), `privateKeyBlock` (PEM), `jwt`.
+  - **Extraction refusal**: all three extraction prompts now instruct the model to never put secret values into `object_text`/`object_detail` — record the practice ("authenticates with GitHub PAT (value withheld)"), never the value. Remote prompt slots need the usual manual update (scenario B2).
+  - **Output floor**: `redactSecrets()` runs unconditionally (no config switch — the floor has no escape hatch) on every memory output surface: brief lines, `memory_search` table cells and Details, `memory_about` lines, and `sql_readonly` cells. Redaction happens before truncation so a secret is never split into an unmatched fragment. This is the only defense for secrets already stored.
+  - **Stock visibility**: `kiroku doctor` scans active facts for secret-like values and reports counts and fact ids (never values), with rotation and cleanup guidance.
+- Exam question 27 (green on arrival) pins the output floor end to end; M5 booklet baseline `0.944444 -> 0.954545`. Anyone whose history predates these rules should treat previously captured keys as exposed and rotate them.
+
 #### memory_feedback MCP Tool (A5)
 - New `memory_feedback(verdict, …)` tool lets the agent correct memory against live evidence: `stale` (observed state contradicts a remembered fact) halves the fact's heat and base_heat down to its type floor — a recoverable demotion, not a deletion; `confirmed` (fact verified against the live system) refreshes `last_accessed_at` and clears `missing_since` without touching heat, so confirmation stops decay but never becomes another rich-get-richer channel.
 - Targets are located with the same fuzzy subject/predicate/object matching as `memory_forget` (tolerates the truncated values shown in search output), plus an optional exact `fact_id`; more than 5 matches refuses to apply and asks for narrower criteria. Every applied verdict writes a `feedback` audit row (verdict, reason, query) — the raw material for the future few-shot distillation loop.

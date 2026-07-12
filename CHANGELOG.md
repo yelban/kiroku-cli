@@ -3,6 +3,15 @@
 All notable changes to Kiroku are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+#### Brief Type Floor (G12)
+- `project_context` selection is now two-phase: a type-floor pass first seats up to `minPerType` facts (default 1) per represented fact_type in type-priority order, then the remaining budget fills in the legacy absolute-priority order — so a tight budget can no longer be monopolized by preferences while high-heat project facts starve. Selected rows still render in the legacy order; with the default wide budget (`maxFacts: 50`) the output is byte-for-byte unchanged (characterization tests pass unmodified).
+- Set `mcp.projectBrief.minPerType` to `0` to restore the legacy selector.
+- Exam question 24 flipped from red to green; the exam's brief behavior record now includes per-type composition counts. M5 booklet baseline: `FAMA 0.877778 -> 0.944444` (`MPA=1.0`). The last remaining red is question 23 (G8).
+
 ## [1.8.0] - 2026-07-12
 
 The Memora/AutoMem improvement program (M4–M5): a three-booklet memory-quality exam with behavior metrics, full-subject retrieval, repo-grounded fact validation, multi-valued predicate semantics, and activated supersede chains. Exam trajectory across the release: M4 booklet FAMA 0.6667 → 1.0 (saturated), M5 booklet 0.5444 → 0.8778 (questions 23/24 price the remaining G8/G12 gaps).

@@ -96,6 +96,7 @@ const behaviorState = {
   briefCalls: 0,
   briefRowCount: 0,
   briefChars: 0,
+  briefTypeCounts: {},
 };
 
 // v1 booklet (questions 01-09), saturated at 1.0 since M3-2. Held as a
@@ -125,9 +126,10 @@ const M4_BASELINE_FAMA_FLOOR = 1.0;
 // 23 -> G8 preference immortalization, 24 -> G12 brief type quotas.
 // Measured M5 baseline pre-G14 fix: MPA 0.6, FAA 0.666667, FAMA 0.544444.
 // Post-G14 fix: FAMA 0.544444 -> 0.677778 (MPA 0.733333, FAA 0.666667).
-// G4 supersede chain baseline: FAMA 0.677778 -> 0.877778 (MPA 0.933333);
-// remaining red: 23 (G8), 24 (G12).
-const M5_BASELINE_FAMA_FLOOR = 0.877778;
+// G4 supersede chain baseline: FAMA 0.677778 -> 0.877778 (MPA 0.933333).
+// G12 brief type-floor baseline: FAMA 0.877778 -> 0.944444 (MPA 1.0);
+// the last red is question 23 (G8 preference immortalization).
+const M5_BASELINE_FAMA_FLOOR = 0.944444;
 
 // Behavior-metric baselines (AutoMem Figure 4 analogues). Deterministic under
 // the fixture workload; both change whenever the question set changes — update
@@ -343,6 +345,9 @@ function briefRows(config, projectId = PROJECT_ID) {
     (sum, r) => sum + `[${r.fact_type}] ${r.subject || '?'} ${r.predicate} ${r.object_text}`.length,
     0,
   );
+  for (const row of rows) {
+    behaviorState.briefTypeCounts[row.fact_type] = (behaviorState.briefTypeCounts[row.fact_type] || 0) + 1;
+  }
   return rows;
 }
 
@@ -442,6 +447,7 @@ function computeBehavior() {
       calls: behaviorState.briefCalls,
       rows: behaviorState.briefRowCount,
       chars: behaviorState.briefChars,
+      typeCounts: behaviorState.briefTypeCounts,
     },
   };
 }
@@ -1525,12 +1531,12 @@ describe.skipIf(!sqliteVecProbe.loaded)('memora mini-FAMA baseline with sqlite-v
     });
   });
 
-  test.fails('24 high-heat project facts keep representation under a tight brief budget (G12)', async () => {
+  test('24 high-heat project facts keep representation under a tight brief budget (G12)', async () => {
     await evaluateQuestion({
       id: '24',
       title: 'brief type quotas',
       booklet: 'm5',
-      expected: 'fail',
+      expected: 'pass',
     }, async ({ criterion }) => {
       const prefs = [
         ['prefers shell', 'zsh'],

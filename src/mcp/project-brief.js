@@ -57,13 +57,15 @@ export function getProjectBrief(db, projectId, config) {
 
 export function selectProjectBriefRows(db, projectId, config) {
   // Accept both old (maxFacts number) and new (config object) signatures
-  let maxFacts, maxTokens;
+  let maxFacts, maxTokens, minPerType;
   if (typeof config === 'number') {
     maxFacts = config;
     maxTokens = 0;
+    minPerType = 1;
   } else {
     maxFacts = config?.maxFacts || 50;
     maxTokens = config?.maxTokens || 0;
+    minPerType = config?.minPerType ?? 1;
   }
 
   // Fetch 3× candidates for diversity filtering
@@ -93,21 +95,49 @@ export function selectProjectBriefRows(db, projectId, config) {
 
   const selected = [];
   let tokenCount = 0;
+  let budgetExhausted = false;
 
-  for (const r of candidates) {
-    if (!isDiverse(r, selected)) continue;
-
-    const line = formatLine(r);
-    const lineTokens = estimateTokens(line);
-
-    if (maxTokens > 0 && tokenCount + lineTokens > maxTokens) break;
-
-    selected.push(r);
+  const trySeat = (row) => {
+    if (selected.length >= maxFacts) { budgetExhausted = true; return 'budget'; }
+    if (!isDiverse(row, selected)) return 'skipped';
+    const lineTokens = estimateTokens(formatLine(row));
+    if (maxTokens > 0 && tokenCount + lineTokens > maxTokens) { budgetExhausted = true; return 'budget'; }
+    selected.push(row);
     tokenCount += lineTokens;
+    return 'added';
+  };
 
-    if (selected.length >= maxFacts) break;
+  // Phase 1 — type floor: in type-priority order, seat up to minPerType facts
+  // per represented type, so a tight budget cannot be monopolized by the top
+  // type (G12). Candidates arrive sorted by type priority then hotness, so
+  // the Map preserves both orders. minPerType 0 restores the legacy selector.
+  if (minPerType > 0) {
+    const byType = new Map();
+    for (const row of candidates) {
+      if (!byType.has(row.fact_type)) byType.set(row.fact_type, []);
+      byType.get(row.fact_type).push(row);
+    }
+    for (let round = 0; round < minPerType && !budgetExhausted; round++) {
+      for (const rows of byType.values()) {
+        if (budgetExhausted) break;
+        while (rows.length) {
+          if (trySeat(rows.shift()) !== 'skipped') break;
+        }
+      }
+    }
   }
 
+  // Phase 2 — fill the remaining budget in the legacy absolute-priority order.
+  for (const row of candidates) {
+    if (budgetExhausted) break;
+    if (selected.includes(row)) continue;
+    trySeat(row);
+  }
+
+  // Present in the legacy order (type priority, then hotness) so a wide
+  // budget renders byte-for-byte identically to the pre-quota selector.
+  const rank = new Map(candidates.map((row, index) => [row, index]));
+  selected.sort((a, b) => rank.get(a) - rank.get(b));
   return selected;
 }
 

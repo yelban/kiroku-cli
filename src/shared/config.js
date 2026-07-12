@@ -133,6 +133,7 @@ const ConfigSchema = z.object({
       enabled: z.boolean().default(true),
       maxFacts: z.number().default(50),
       maxTokens: z.number().default(4000), // 0 = unlimited
+      minPerType: z.number().default(1),   // type-floor seats per represented fact_type; 0 = legacy absolute priority
     }).default({}),
     search: z.object({
       ranking: z.object({

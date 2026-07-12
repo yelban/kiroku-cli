@@ -3,7 +3,9 @@
 All notable changes to Kiroku are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.8.0] - 2026-07-12
+
+The Memora/AutoMem improvement program (M4–M5): a three-booklet memory-quality exam with behavior metrics, full-subject retrieval, repo-grounded fact validation, multi-valued predicate semantics, and activated supersede chains. Exam trajectory across the release: M4 booklet FAMA 0.6667 → 1.0 (saturated), M5 booklet 0.5444 → 0.8778 (questions 23/24 price the remaining G8/G12 gaps).
 
 ### Added
 
